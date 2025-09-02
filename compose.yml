@@ -1,0 +1,14 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hse-geosensors-app
+    ports:
+      - "${PORT}:5000"
+    volumes:
+      - ./output:/app/output
+    env_file:
+      - .env
+    container_name: geosensors-app
+    restart: unless-stopped
