@@ -1,489 +1,675 @@
+# vis.py
+import json
+import logging
+from datetime import datetime, timedelta
+from collections import defaultdict
+
 import folium
 from folium.plugins import MarkerCluster
 from flask import Flask, render_template_string, request
 import requests
-import json
-import logging
-from datetime import datetime
-# Настройка логирования
+
+# Геометрия/проекции для устойчивого чтения координат
+from shapely.geometry import shape, Point
+from shapely.ops import transform as shp_transform
+import pyproj
+
+# ---------------- ЛОГИ ----------------
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vis")
+
+# ---------------- FLASK ----------------
 app = Flask(__name__)
 app.config["CACHE_TYPE"] = "null"
-# Глобальное хранилище данных для дашбордов
+
+# ---------------- ПАЛИТРА ----------------
+colors = [
+    '#C8A2C8', '#87CEEB', '#5F6A79', '#2F4F4F', '#A0522D', '#4682B4',
+    '#556B2F', '#DDA0DD', '#B0C4DE', '#20B2AA', '#A52A2A', '#808080', '#008080'
+]
+DARK_GREEN = '#2F4F4F'
+PALE_BLUE  = '#87CEEB'
+SLATE      = '#5F6A79'
+
+# ---------------- MULTIDATASTREAM (RUDN) ----------------
+OBS_PROPS = [
+    {"name": "Dn", "desc": "Минимальное направление ветра", "unit": "°"},
+    {"name": "Dm", "desc": "Среднее направление ветра", "unit": "°"},
+    {"name": "Dx", "desc": "Максимальное направление ветра", "unit": "°"},
+    {"name": "Sn", "desc": "Минимальная скорость ветра",  "unit": "м/с"},
+    {"name": "Sm", "desc": "Средняя скорость ветра",      "unit": "м/с"},
+    {"name": "Sx", "desc": "Максимальная скорость ветра", "unit": "м/с"},
+    {"name": "Ta", "desc": "Температура воздуха",          "unit": "°C"},
+    {"name": "Ua", "desc": "Влажность воздуха",            "unit": "%"},
+    {"name": "Pa", "desc": "Атмосферное давление",         "unit": "hPa"},
+    {"name": "Rc", "desc": "Осадки",                       "unit": "мм"},
+]
+INDEX = {p["name"]: i for i, p in enumerate(OBS_PROPS)}
+TARGET_PROPS_RUDN = {
+    "Ta": {"desc": "Температура воздуха", "color": colors[0], "unit": "°C", "icon": "thermometer-half"},
+    "Ua": {"desc": "Влажность воздуха",   "color": colors[1], "unit": "%",  "icon": "droplet"},
+    "Pa": {"desc": "Атмосферное давление","color": colors[2], "unit": "hPa","icon": "cloud"},
+}
+
+# ---------------- DATASTREAM (второй сервер) ----------------
+TARGET_DS_LIST = [
+    "Ощущаемая температура воздуха",
+    "Влажность воздуха",
+    "Концентрация CO2",
+]
+TARGET_PROPS_DS = {
+    "Ощущаемая температура воздуха": {"name": "ApparentTemperature", "desc": "Ощущаемая температура воздуха", "color": colors[0], "unit": "°C", "icon": "thermometer-half"},
+    "Влажность воздуха":              {"name": "Humidity",            "desc": "Влажность воздуха",             "color": colors[1], "unit": "%",   "icon": "droplet"},
+    "Концентрация CO2":               {"name": "CO2",                 "desc": "Концентрация CO2",              "color": colors[2], "unit": "ppm", "icon": "cloud-haze2"},
+}
+
+# ---------------- ХРАНИЛИЩЕ ДЛЯ ДАШБОРДОВ ----------------
+# ключ: префикс + "<safe_location>__<id>"  (префикс MD__ или DS__)
 dashboard_data = {}
-# Палитра цветов
-colors = ['#C8A2C8', '#87CEEB', '#5F6A79', '#2F4F4F', '#A0522D', '#4682B4',
-          '#556B2F', '#DDA0DD', '#B0C4DE', '#20B2AA', '#A52A2A', '#808080', '#008080']
-def get_latest_observation(datastream):
-    """Получить последнее наблюдение для Datastream"""
-    observations = datastream.get('Observations', [])
-    if not observations:
-        logger.warning(f"Нет наблюдений для Datastream: {datastream.get('name', 'Unknown')}")
-        return None, None
-    latest_obs = observations[0] # Observations отсортированы по phenomenonTime desc
-    result = latest_obs.get('result')
-    if result is None:
-        logger.warning(f"Пустое значение result в наблюдении для Datastream: {datastream.get('name', 'Unknown')}")
-        return None, None
-    return float(result), datastream.get('unitOfMeasurement', {}).get('symbol', '')
-def get_sensor_data(thing, location_name):
-    """Получить данные для Thing"""
-    thing_id = thing.get('@iot.id')
-    thing_name = thing.get('name', 'Unknown Thing')
-    datastreams = thing.get('Datastreams', [])
-   
-    logger.debug(f"Обработка Thing: {thing_name} (ID: {thing_id}) в локации: {location_name}")
-   
+
+# ---------------- УТИЛИТЫ ----------------
+def make_safe_key(s: str) -> str:
+    return (s or "Unknown").replace(" ", "_").replace(",", "_").replace("/", "_")
+
+def is_epsg3857(x: float, y: float) -> bool:
+    return abs(x) > 180 or abs(y) > 90
+
+def parse_location_coords(loc_obj):
+    """Возвращает (lat, lon) — устойчиво читает GeoJSON, Feature, value, либо lon/lat поля."""
+    if not loc_obj:
+        return None
+    geo = None
+    try:
+        if isinstance(loc_obj, dict) and "type" in loc_obj and "coordinates" in loc_obj:
+            geo = shape(loc_obj)
+        elif isinstance(loc_obj, dict) and loc_obj.get("type") == "Feature" and "geometry" in loc_obj:
+            geo = shape(loc_obj["geometry"])
+        elif isinstance(loc_obj, dict) and "value" in loc_obj:
+            v = loc_obj["value"]
+            if isinstance(v, dict) and "type" in v and "coordinates" in v:
+                geo = shape(v)
+            elif isinstance(v, dict) and v.get("type") == "Feature" and "geometry" in v:
+                geo = shape(v["geometry"])
+    except Exception as e:
+        logger.debug("GeoJSON не распознан: %s", e)
+
+    if geo is not None:
+        if geo.geom_type == "Point":
+            x, y = geo.x, geo.y
+        else:
+            c = geo.centroid
+            x, y = c.x, c.y
+        if is_epsg3857(x, y):
+            project = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
+            p = shp_transform(project, Point(x, y))
+            lon, lat = p.x, p.y
+        else:
+            lon, lat = x, y
+        return (lat, lon)
+
+    if isinstance(loc_obj, dict):
+        lon = loc_obj.get("longitude") or loc_obj.get("lon")
+        lat = loc_obj.get("latitude")  or loc_obj.get("lat")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            return (float(lat), float(lon))
+    return None
+
+# ---------- RUDN helpers ----------
+def get_latest_triplet_from_md(md) -> dict:
+    obs_list = md.get("Observations") or []
+    if not obs_list:
+        return {}
+    latest = obs_list[0]
+    result = latest.get("result") or []
+    out = {}
+    for k in ["Ta", "Ua", "Pa"]:
+        idx = INDEX.get(k)
+        if idx is not None and idx < len(result) and result[idx] is not None:
+            out[k] = (float(result[idx]), TARGET_PROPS_RUDN[k]["unit"])
+    return out
+
+def collect_timeseries_from_md(location_name: str, md) -> None:
+    """Сохраняем таймсерии + ветер под ключом MD__<loc>__<@iot.id>.
+       ВАЖНО: obs_props теперь содержит цвет из палитры для каждого свойства (не серый)."""
+    md_id = str(md.get('@iot.id'))
+    obs_list = md.get("Observations") or []
+    if not obs_list or md_id is None:
+        return
+
     values = []
-    target_props = [
-        "Ощущаемая температура воздуха",
-        "Влажность воздуха",
-        "Концентрация CO2"
-    ]
-   
-    prop_configs = {
-        "Ощущаемая температура воздуха": {
-            "name": "ApparentTemperature",
-            "desc": "Ощущаемая температура воздуха",
-            "color": colors[0], # #C8A2C8
-            "unit": "°C",
-            "icon": "thermometer-half"
-        },
-        "Влажность воздуха": {
-            "name": "Humidity",
-            "desc": "Влажность воздуха",
-            "color": colors[1], # #87CEEB
-            "unit": "%",
-            "icon": "droplet"
-        },
-        "Концентрация CO2": {
-            "name": "CO2",
-            "desc": "Концентрация CO2",
-            "color": colors[2], # #5F6A79
-            "unit": "ppm",
-            "icon": "cloud-haze2"
-        }
-    }
-   
-    # Список всех свойств для графика
     all_props = []
-    color_index = 3 # Начинаем с colors[3] для дополнительных Datastreams
-    for datastream in datastreams:
-        datastream_name = datastream.get('name', '')
-        if not datastream_name:
-            logger.debug(f"Пропуск Datastream с пустым именем")
+    names_seen = set()  # чтобы не дублировать описания свойств
+
+    dm_series, sm_series = [], []
+
+    for obs in obs_list:
+        result = obs.get("result") or []
+        if len(result) != len(OBS_PROPS):
             continue
-        # Создаем конфигурацию для всех Datastreams
-        prop_config = prop_configs.get(datastream_name, {
-            "name": datastream_name,
-            "desc": datastream_name,
-            "color": colors[color_index % len(colors)],
-            "unit": datastream.get('unitOfMeasurement', {}).get('symbol', ''),
-            "icon": "question-circle"
-        })
-        all_props.append(prop_config)
-        if datastream_name not in target_props:
-            color_index += 1 # Увеличиваем индекс цвета для следующего Datastream
-       
-        observations = datastream.get('Observations', [])
-        if not observations:
-            logger.warning(f"Нет наблюдений для Datastream: {datastream_name}")
-            continue
-        for obs in observations:
-            result = obs.get('result')
-            if result is None or result == 0:
-                logger.warning(f"Пропуск наблюдения с result={result} для Datastream: {datastream_name}")
+        ts = obs.get("phenomenonTime")
+        for i, prop in enumerate(OBS_PROPS):
+            if result[i] is None:
+                continue
+            val = float(result[i])
+
+            # таймсерия по каждому свойству
+            values.append({
+                "timestamp": ts,
+                "prop": prop["name"],
+                "value": val,
+                "desc": prop["desc"],
+                "unit": prop["unit"],
+                "color": colors[i % len(colors)]
+            })
+
+            # метаданные свойства с цветом из палитры
+            if prop["name"] not in names_seen:
+                all_props.append({
+                    "name": prop["name"],
+                    "desc": prop["desc"],
+                    "unit": prop["unit"],
+                    "color": colors[i % len(colors)]
+                })
+                names_seen.add(prop["name"])
+
+        # отдельные серии для ветра
+        if result[INDEX["Dm"]] is not None:
+            dm_series.append((ts, float(result[INDEX["Dm"]])))
+        if result[INDEX["Sm"]] is not None:
+            sm_series.append((ts, float(result[INDEX["Sm"]])))
+
+    if values:
+        loc_key = make_safe_key(location_name)
+        key = f"MD__{loc_key}__{md_id}"
+        dashboard_data[key] = {
+            "values": values,
+            "obs_props": all_props,  # содержит "color" для каждой метрики
+            "target_props": [
+                {"name": "Ta", "desc": TARGET_PROPS_RUDN["Ta"]["desc"], "icon": TARGET_PROPS_RUDN["Ta"]["icon"],
+                 "color": TARGET_PROPS_RUDN["Ta"]["color"], "unit": TARGET_PROPS_RUDN["Ta"]["unit"]},
+                {"name": "Ua", "desc": TARGET_PROPS_RUDN["Ua"]["desc"], "icon": TARGET_PROPS_RUDN["Ua"]["icon"],
+                 "color": TARGET_PROPS_RUDN["Ua"]["color"], "unit": TARGET_PROPS_RUDN["Ua"]["unit"]},
+                {"name": "Pa", "desc": TARGET_PROPS_RUDN["Pa"]["desc"], "icon": TARGET_PROPS_RUDN["Pa"]["icon"],
+                 "color": TARGET_PROPS_RUDN["Pa"]["color"], "unit": TARGET_PROPS_RUDN["Pa"]["unit"]},
+            ],
+            "title": f"{md_id}, {location_name}",
+            "dm_series": dm_series,
+            "sm_series": sm_series,
+            "source": "RUDN"
+        }
+
+# ---------- второй сервер helpers ----------
+def get_latest_observation_value_unit(datastream):
+    obs = datastream.get('Observations') or []
+    if not obs:
+        return None, ""
+    latest = obs[0]
+    res = latest.get("result")
+    if res is None:
+        return None, ""
+    unit = (datastream.get('unitOfMeasurement') or {}).get('symbol', '')
+    try:
+        return float(res), unit
+    except Exception:
+        return None, unit
+
+def collect_timeseries_from_thing(location_name: str, thing) -> None:
+    """Сохраняем датastream-временные ряды под ключом DS__<loc>__<thingName>."""
+    thing_name = thing.get('name', f"Thing-{thing.get('@iot.id')}")
+    datastreams = thing.get('Datastreams') or []
+    if not datastreams:
+        return
+
+    values, obs_props = [], []
+    for ds in datastreams:
+        ds_name = ds.get('name', '')
+        if ds_name in TARGET_PROPS_DS:
+            cfg = TARGET_PROPS_DS[ds_name]
+        else:
+            cfg = {
+                "name": ds_name or f"DS-{ds.get('@iot.id')}",
+                "desc": ds_name or f"Datastream {ds.get('@iot.id')}",
+                "color": colors[(3 + len(obs_props)) % len(colors)],
+                "unit": (ds.get('unitOfMeasurement') or {}).get('symbol', ''),
+                "icon": "activity"
+            }
+        if not any(p["name"] == cfg["name"] for p in obs_props):
+            obs_props.append(cfg)
+
+        for ob in (ds.get('Observations') or []):
+            res = ob.get('result')
+            if res is None:
+                continue
+            try:
+                v = float(res)
+            except Exception:
                 continue
             values.append({
-                "timestamp": obs["phenomenonTime"],
-                "prop": prop_config["name"],
-                "prop_desc": prop_config["desc"],
-                "value": float(result),
-                "color": prop_config["color"],
-                "unit": prop_config["unit"],
-                "icon": prop_config["icon"]
+                "timestamp": ob.get("phenomenonTime"),
+                "prop": cfg["name"],
+                "value": v,
+                "desc": cfg["desc"],
+                "unit": cfg["unit"],
+                "color": cfg["color"]
             })
-   
-    # Сохраняем данные для дашборда
+
     if values:
-        key = f"{location_name.replace(' ', '_')},_{thing_name.replace(' ', '_')}"
-        logger.debug(f"Сохранение данных для ключа: {key}")
+        loc_key = make_safe_key(location_name)
+        key = f"DS__{loc_key}__{make_safe_key(thing_name)}"
         dashboard_data[key] = {
-            'values': values,
-            'obs_props': all_props,
-            'target_props': [prop_configs[prop] for prop in target_props if prop in prop_configs] # Только целевые для карточек
+            "values": values,
+            "obs_props": obs_props,
+            "target_props": [TARGET_PROPS_DS[nm] for nm in TARGET_DS_LIST if nm in TARGET_PROPS_DS],
+            "title": f"{thing_name}, {location_name}",
+            "dm_series": [],  # у этого сервера нет ветра в таком формате
+            "sm_series": [],
+            "source": "OTHER"
         }
-    else:
-        logger.warning(f"Нет валидных данных для Thing: {thing_name} в локации: {location_name}")
-   
-    # Возвращаем только значения для целевых свойств
-    target_values = [v for v in values if v["prop"] in [prop_configs[prop]["name"] for prop in target_props if prop in prop_configs]]
-    return target_values
+
+# ---------------- Корневая карта: оба сервера ----------------
 @app.route("/")
-def generate_root_page():
-    # Запрос данных
-    url = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
-    try:
-        logger.debug(f"Отправка запроса к API: {url}")
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        logger.debug(f"Полученные данные: {json.dumps(data, indent=2)}")
-    except requests.RequestException as e:
-        logger.error(f"Ошибка при запросе данных: {e}")
-        return f"Ошибка при запросе данных: {e}"
-   
-    # Создаем карту
-    m = folium.Map(
-        location=(55.7558, 37.6175),
-        zoom_start=14,
-        tiles='CartoDB positron',
-        min_zoom=10,
-        max_zoom=19,
-        max_bounds=True,
-        max_bounds_viscosity=1.0
-    )
-   
-    # Подключаем стили
+def root_map():
+    m = folium.Map(location=(55.7558, 37.6175), zoom_start=12, tiles='CartoDB positron')
+
     m.get_root().header.add_child(folium.Element("""
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&family=Poppins:wght@600;700&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
         <style>
-            .sensor-popup h4 {
-                font-family: 'Poppins', 'Inter', sans-serif;
-                font-weight: 700;
-                font-size: 1.6em;
-                margin-bottom: 15px;
-            }
-            .mini-metrics {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 10px;
-                margin: 15px 0;
-            }
+            .sensor-popup h4 { font-family:'Poppins','Inter',sans-serif; font-weight:700; font-size:1.3em; margin-bottom:10px; }
+            .radio-block { margin-bottom:8px; }
+            .radio-block .form-check-label { font-weight:600; font-size:1.0em; }
 
-            .mini-metric {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 8px;
-                padding: 12px;
-                border-radius: 12px;
-                font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-                font-weight: 600;
-                font-size: 1.2em;
-                text-align: center;
-                transition: transform 0.2s;
-            }
-            .mini-metric:hover {
-                transform: translateY(-3px);
-                background: rgba(0,0,0,0.08);
-            }
-            .mini-apparenttemperature {
-                background: rgba(200, 162, 200, 0.2);
-            }
-            .mini-apparenttemperature:hover {
-                background: rgba(200, 162, 200, 0.3);
-            }
-            .mini-humidity {
-                background: rgba(135, 206, 235, 0.2);
-            }
-            .mini-humidity:hover {
-                background: rgba(135, 206, 235, 0.3);
-            }
-            .mini-co2 {
-                background: rgba(95, 106, 121, 0.2);
-            }
-            .mini-co2:hover {
-                background: rgba(95, 106, 121, 0.3);
-            }
+            .mini-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:10px 0; }
+            .mini-metric { display:flex; flex-direction:column; align-items:center; gap:8px; padding:12px; border-radius:12px;
+                           font-family:'Inter',system-ui; font-weight:600; font-size:1.05em; text-align:center; }
+            .mini-ta { background:rgba(200,162,200,.2); }
+            .mini-ua { background:rgba(135,206,235,.2); }
+            .mini-pa { background:rgba(95,106,121,.2); }
 
-            .mini-apparenttemperature .mini-icon { color: colors[0]; }
-            .mini-humidity .mini-icon { color: colors[1]; }
-            .mini-co2 .mini-icon { color: colors[2]; }
+            .mini-apparenttemperature { background:rgba(200,162,200,.2); }
+            .mini-humidity            { background:rgba(135,206,235,.2); }
+            .mini-co2                 { background:rgba(95,106,121,.2); }
 
-            .mini-icon {
-                font-size: 2.2em;
-                margin-bottom: 5px;
-            }
-            .mini-value { font-size: 1.3em; font-weight: 700; }
-            .mini-label { font-size: 0.85em; opacity: 0.7; }
+            .mini-icon { font-size:1.6em; }
+            .mini-value { font-size:1.15em; font-weight:700; }
+            .mini-label { font-size:.85em; opacity:.75; }
 
-            .dashboard-btn {
-                background-color: #000 !important;
-                color: white !important;
-                font-size: 1.1em !important;
-                font-weight: bold !important;
-                padding: 12px 24px !important;
-                border-radius: 8px !important;
-                text-decoration: none !important;
-                display: inline-block !important;
-                margin-top: 15px !important;
-                transition: background-color 0.3s;
-            }
-            .dashboard-btn:hover {
-                background-color: #333 !important;
-                color: white !important;
-            }
-            .cluster-icon {
-                background-color: #008B8B;
-                color: white;
-                border-radius: 50%;
-                width: 30px;
-                height: 30px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            .thing-radio { margin-bottom: 10px; }
-            .thing-radio .form-check-label {
-                font-weight: bold;
-                font-size: 1.1em;
-            }
+            .dashboard-btn { background:#000; color:#fff !important; font-weight:700; padding:10px 18px; border-radius:8px;
+                             text-decoration:none; display:inline-block; margin-top:10px; }
         </style>
         <script>
-            function updateMetrics(thingId) {
-                document.querySelectorAll('.thing-metrics').forEach(el => el.style.display = 'none');
-                document.getElementById('metrics-' + thingId).style.display = 'block';
-                document.querySelectorAll('.dashboard-btn').forEach(btn => btn.style.display = 'none');
-                document.getElementById('btn-' + thingId).style.display = 'inline-block';
+            function switchMD(containerId, mdId) {
+                document.querySelectorAll('#' + containerId + ' .md-metrics').forEach(el => el.style.display = 'none');
+                const shown = document.getElementById('metrics-' + mdId);
+                if (shown) shown.style.display = 'block';
+                document.querySelectorAll('#' + containerId + ' .dash-btn').forEach(el => el.style.display='none');
+                const btn = document.getElementById('btn-' + mdId);
+                if (btn) btn.style.display='inline-block';
+            }
+            function switchThing(containerId, thingId) {
+                document.querySelectorAll('#' + containerId + ' .thing-metrics').forEach(el => el.style.display = 'none');
+                const shown = document.getElementById('metrics-thing-' + thingId);
+                if (shown) shown.style.display = 'block';
+                document.querySelectorAll('#' + containerId + ' .dash-btn').forEach(el => el.style.display='none');
+                const btn = document.getElementById('btn-thing-' + thingId);
+                if (btn) btn.style.display='inline-block';
             }
         </script>
     """))
-   
-    marker_cluster = MarkerCluster(
-        options={
-            'iconCreateFunction': '''
-                function(cluster) {
-                    return L.divIcon({
-                        html: '<div class="cluster-icon">' + cluster.getChildCount() + '</div>',
-                        className: 'marker-cluster',
-                        iconSize: L.point(30, 30)
-                    });
-                }
-            '''
-        }
-    ).add_to(m)
-   
-    # Обработка локаций
-    for location in data.get('value', []):
-        location_name = location.get('name', 'Unknown Location')
-        coordinates = location.get('location', {}).get('coordinates')
-        if not coordinates or len(coordinates) < 2:
-            logger.warning(f"Нет координат для Location: {location_name}")
+
+    marker_cluster = MarkerCluster().add_to(m)
+    icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
+
+    # ----- 1) RUDN (MultiDatastreams)
+    since = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d') + "T00:00:00%2B03:00"
+    url_rudn = (
+        "http://94.154.11.74/frost/v1.1/Locations?"
+        "$expand=Things("
+            "$expand=MultiDatastreams("
+                "$expand=Observations("
+                    "$top=500;$count=true;$orderby=phenomenonTime desc;"
+                    f"$filter=phenomenonTime ge {since}"
+                ")"
+            ")"
+        ")"
+    )
+    try:
+        logger.debug("RUDN запрос: %s", url_rudn)
+        resp = requests.get(url_rudn, timeout=25)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.exception("Ошибка запроса RUDN")
+        data = {"value": []}
+
+    for loc in data.get("value", []):
+        location_name = loc.get("name", "Unknown RUDN")
+        latlon = parse_location_coords(loc.get("location"))
+        if not latlon:
+            logger.warning("Нет координат у %s", location_name)
             continue
-        things = location.get('Things', [])
-        popup_content = f'<div class="sensor-popup"><h4>{location_name}</h4>'
-        if not things:
-            popup_content += '<p>К этой локации не привязаны датчики</p>'
+        lat, lon = latlon
+
+        md_list = []
+        for th in (loc.get("Things") or []):
+            md_list.extend(th.get("MultiDatastreams") or [])
+
+        container_id = f"MD-{make_safe_key(location_name)}"
+        popup_html = [f'<div id="{container_id}" class="sensor-popup"><h4>{location_name}</h4>']
+
+        if not md_list:
+            popup_html.append('<p>К этой локации не привязаны MultiDatastreams</p>')
         else:
-            popup_content += '<div class="thing-radio">'
-            for i, thing in enumerate(things):
-                thing_id = thing.get('@iot.id')
-                thing_name = thing.get('name', 'Unknown Thing')
+            popup_html.append('<div class="radio-block">')
+            for i, md in enumerate(md_list):
+                mdid = str(md.get('@iot.id'))
                 checked = 'checked' if i == 0 else ''
-                popup_content += f'''
+                popup_html.append(f"""
                     <div class="form-check">
-                        <input class="form-check-input" type="radio" name="thing" id="thing-{thing_id}" {checked} onclick="updateMetrics('{thing_id}')">
-                        <label class="form-check-label" for="thing-{thing_id}">{thing_name}</label>
+                        <input class="form-check-input" type="radio" name="md-{container_id}" id="md-{mdid}" {checked}
+                               onclick="switchMD('{container_id}', '{mdid}')">
+                        <label class="form-check-label" for="md-{mdid}">{mdid}</label>
                     </div>
-                '''
-            popup_content += '</div>'
-            for i, thing in enumerate(things):
-                thing_id = thing.get('@iot.id')
-                thing_name = thing.get('name', 'Unknown Thing')
-                datastreams = thing.get('Datastreams', [])
-               
-                # Получаем данные для дашборда
-                values = get_sensor_data(thing, location_name)
-               
-                # Формируем безопасный ключ для URL
-                safe_key = f"{location_name.replace(' ', '_')},_{thing_name.replace(' ', '_')}"
-               
-                # Проверяем наличие нужных Datastreams и Observations для попапа
-                target_props = ["Ощущаемая температура воздуха", "Влажность воздуха", "Концентрация CO2"]
-                has_target_datastreams = any(ds.get('name') in target_props for ds in datastreams)
-                has_target_observations = any(ds.get('Observations', []) for ds in datastreams if ds.get('name') in target_props)
-                has_any_observations = any(ds.get('Observations', []) for ds in datastreams)
-               
-                popup_content += f'<div id="metrics-{thing_id}" class="thing-metrics" style="display: {"block" if i == 0 else "none"}">'
-                if not has_target_datastreams or not has_target_observations:
-                    popup_content += '<p>Отсутствуют данные об ощущаемой температуре, влажности воздуха и концентрации CO2</p>'
+                """)
+            popup_html.append('</div>')
+
+            for i, md in enumerate(md_list):
+                mdid = str(md.get('@iot.id'))
+                key = f"MD__{make_safe_key(location_name)}__{mdid}"
+
+                collect_timeseries_from_md(location_name, md)
+                has_any_obs = bool(md.get("Observations"))
+                latest = get_latest_triplet_from_md(md) if has_any_obs else {}
+                display = "block" if i == 0 else "none"
+
+                popup_html.append(f'<div id="metrics-{mdid}" class="md-metrics" style="display:{display}">')
+                if not has_any_obs:
+                    popup_html.append('<p class="text-muted mb-2">Нет данных (Observations) за последние 24 часа</p>')
                 else:
-                    popup_content += '<div class="mini-metrics">'
-                    for prop in target_props:
-                        prop_config = {
-                            "Ощущаемая температура воздуха": {"name": "ApparentTemperature", "icon": "thermometer-half", "color": colors[0]},
-                            "Влажность воздуха": {"name": "Humidity", "icon": "droplet", "color": colors[1]},
-                            "Концентрация CO2": {"name": "CO2", "icon": "cloud-haze2", "color": colors[2]}
-                        }.get(prop)
-                        value, unit = None, ""
-                        for ds in datastreams:
-                            if ds.get('name') == prop:
-                                value, unit = get_latest_observation(ds)
-                                break
-                        popup_content += f'''
-                            <div class="mini-metric mini-{prop_config["name"].lower()}">
-                                <div class="mini-icon"><i class="bi bi-{prop_config["icon"]}"></i></div>
-                                <div class="mini-value">{round(value, 1) if value is not None else ''}{unit if value is not None else ''}</div>
-                                <div class="mini-label">{prop}</div>
+                    popup_html.append('<div class="mini-metrics">')
+                    for prop in ["Ta", "Ua", "Pa"]:
+                        conf = TARGET_PROPS_RUDN[prop]
+                        val = latest.get(prop)
+                        value_str = f"{round(val[0],1)}{val[1]}" if val else "—"
+                        popup_html.append(f"""
+                            <div class="mini-metric mini-{prop.lower()}">
+                                <div class="mini-icon"><i class="bi bi-{conf['icon']}"></i></div>
+                                <div class="mini-value">{value_str}</div>
+                                <div class="mini-label">{conf['desc']}</div>
                             </div>
-                        '''
-                    popup_content += '</div>'
-               
-                # Кнопка дашборда активна, если есть любые наблюдения
-                popup_content += f'<a href="/dashboard/{safe_key}" class="dashboard-btn" id="btn-{thing_id}" style="display: {"inline-block" if i == 0 else "none"}" {"disabled" if not has_any_observations else ""}>Дашборд для {thing_name}</a>'
-                popup_content += '</div>'
-        popup_content += '</div>'
-        popup = folium.Popup(popup_content, max_width=340, min_width=300)
-        sensor_icon = folium.CustomIcon(
-            icon_image='https://cdn-icons-png.flaticon.com/512/10338/10338121.png',
-            icon_size=(32, 32),
-            icon_anchor=(16, 32),
-            popup_anchor=(0, -32)
-        )
-        marker = folium.Marker(
-            location=(coordinates[1], coordinates[0]),
-            popup=popup,
-            tooltip=location_name,
-            icon=sensor_icon
-        )
-        marker.add_to(marker_cluster)
-   
-    m.save("output/index.htm")
+                        """)
+                    popup_html.append('</div>')
+                if key in dashboard_data and dashboard_data[key]["values"]:
+                    popup_html.append(f'<a class="dashboard-btn dash-btn" id="btn-{mdid}" href="/dashboard/{key}">Дашборд</a>')
+                popup_html.append('</div>')
+
+        popup_html.append('</div>')
+        folium.Marker(
+            location=(lat, lon),
+            popup=folium.Popup("".join(popup_html), max_width=360, min_width=320),
+            tooltip=f"RUDN · {location_name}",
+            icon=folium.CustomIcon(icon_url, icon_size=(32, 32), icon_anchor=(16, 32), popup_anchor=(0, -32))
+        ).add_to(marker_cluster)
+
+    # ----- 2) Второй сервер (Datastreams)
+    url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
+    try:
+        logger.debug("OTHER запрос: %s", url_ds)
+        resp2 = requests.get(url_ds, timeout=25)
+        resp2.raise_for_status()
+        data2 = resp2.json()
+    except Exception as e:
+        logger.exception("Ошибка запроса второго сервера")
+        data2 = {"value": []}
+
+    for loc in data2.get("value", []):
+        location_name = loc.get('name', 'Unknown Location')
+        coords = parse_location_coords(loc.get('location'))
+        if not coords:
+            logger.warning("Нет координат у %s (2й сервер)", location_name)
+            continue
+        lat, lon = coords
+
+        things = loc.get('Things') or []
+        container_id = f"DS-{make_safe_key(location_name)}"
+        popup_html = [f'<div id="{container_id}" class="sensor-popup"><h4>{location_name}</h4>']
+
+        if not things:
+            popup_html.append('<p>К этой локации не привязаны сенсоры</p>')
+        else:
+            popup_html.append('<div class="radio-block">')
+            for i, th in enumerate(things):
+                tid = th.get('@iot.id')
+                tname = th.get('name', f"Thing-{tid}")
+                checked = 'checked' if i == 0 else ''
+                popup_html.append(f"""
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="thing-{container_id}" id="thing-{tid}" {checked}
+                               onclick="switchThing('{container_id}', '{tid}')">
+                        <label class="form-check-label" for="thing-{tid}">{tname}</label>
+                    </div>
+                """)
+            popup_html.append('</div>')
+
+            for i, th in enumerate(things):
+                tid = th.get('@iot.id')
+                tname = th.get('name', f"Thing-{tid}")
+                datastreams = th.get('Datastreams') or []
+                key = f"DS__{make_safe_key(location_name)}__{make_safe_key(tname)}"
+
+                # Сохраняем таймсерии для дашборда
+                collect_timeseries_from_thing(location_name, th)
+
+                # карточки
+                latest_values = {}
+                for prop_title in TARGET_DS_LIST:
+                    for ds in datastreams:
+                        if ds.get('name') == prop_title:
+                            v, u = get_latest_observation_value_unit(ds)
+                            latest_values[prop_title] = (v, u)
+                            break
+
+                display = "block" if i == 0 else "none"
+                popup_html.append(f'<div id="metrics-thing-{tid}" class="thing-metrics" style="display:{display}">')
+
+                if not any(ds.get('Observations') for ds in datastreams):
+                    popup_html.append('<p class="text-muted mb-2">Нет данных (Observations)</p>')
+                else:
+                    popup_html.append('<div class="mini-metrics">')
+                    for title in TARGET_DS_LIST:
+                        cfg = TARGET_PROPS_DS[title]
+                        v = latest_values.get(title)
+                        s = f"{round(v[0],1)}{v[1]}" if v and v[0] is not None else "—"
+                        cls = "mini-" + cfg["name"].lower()
+                        popup_html.append(f"""
+                            <div class="mini-metric {cls}">
+                                <div class="mini-icon"><i class="bi bi-{cfg['icon']}"></i></div>
+                                <div class="mini-value">{s}</div>
+                                <div class="mini-label">{cfg['desc']}</div>
+                            </div>
+                        """)
+                    popup_html.append('</div>')
+
+                if key in dashboard_data and dashboard_data[key]["values"]:
+                    popup_html.append(f'<a class="dashboard-btn dash-btn" id="btn-thing-{tid}" href="/dashboard/{key}">Дашборд</a>')
+
+                popup_html.append('</div>')
+
+        popup_html.append('</div>')
+        folium.Marker(
+            location=(lat, lon),
+            popup=folium.Popup("".join(popup_html), max_width=360, min_width=320),
+            tooltip=f"Другой сервер · {location_name}",
+            icon=folium.CustomIcon(icon_url, icon_size=(32, 32), icon_anchor=(16, 32), popup_anchor=(0, -32))
+        ).add_to(marker_cluster)
+
     return render_template_string(m._repr_html_())
-@app.route("/api/data/<sensor_name>")
-def get_api_data(sensor_name):
-    """API-эндпоинт для получения данных графика"""
-    logger.debug(f"Запрос данных для сенсора: {sensor_name}")
-    if sensor_name not in dashboard_data:
-        logger.error(f"Данные для сенсора '{sensor_name}' не найдены в dashboard_data")
+
+# ---------------- API для графика ----------------
+@app.route("/api/data/<sensor_key>")
+def api_data(sensor_key):
+    if sensor_key not in dashboard_data:
         return json.dumps([])
-   
-    sensor_data = dashboard_data[sensor_name]
-    values = sensor_data['values']
-    obs_props = sensor_data['obs_props']
-   
+    sensor = dashboard_data[sensor_key]
+    values = sensor['values']
+    obs_props = sensor['obs_props']
+
     metrics_str = request.args.get('metrics')
     if not metrics_str:
-        logger.warning("Параметр 'metrics' не предоставлен")
         return json.dumps([])
-   
+
     try:
-        selected_props = json.loads(metrics_str)
-        if not isinstance(selected_props, list):
-            selected_props = [selected_props]
-    except json.JSONDecodeError as e:
-        logger.error(f"Ошибка декодирования JSON в параметре metrics: {e}")
+        selected = json.loads(metrics_str)
+        if not isinstance(selected, list):
+            selected = [selected]
+    except Exception:
         return json.dumps([])
-   
+
     result = []
-    for prop_name in selected_props:
-        prop_data = [{"timestamp": v["timestamp"], "value": v["value"]} for v in values if v["prop"] == prop_name]
-        if prop_data:
-            prop_info = next((p for p in obs_props if p["name"] == prop_name), {
-                "desc": prop_name,
-                "color": "#999999",
-                "unit": ""
-            })
-            result.append({
-                "prop": prop_name,
-                "timestamps": [d["timestamp"] for d in prop_data],
-                "values": [d["value"] for d in prop_data],
-                "desc": prop_info["desc"],
-                "color": prop_info["color"],
-                "unit": prop_info["unit"]
-            })
-    logger.debug(f"Возвращаемые данные для сенсора {sensor_name}: {json.dumps(result, indent=2)}")
+    for prop_name in selected:
+        prop_data = [v for v in values if v["prop"] == prop_name]
+        if not prop_data:
+            continue
+        prop_info = next((p for p in obs_props if p["name"] == prop_name), {
+            "desc": prop_name, "unit": "", "color": "#999999"
+        })
+        color = prop_info.get("color", "#999999")
+        result.append({
+            "prop": prop_name,
+            "timestamps": [d["timestamp"] for d in prop_data],
+            "values": [d["value"] for d in prop_data],
+            "desc": prop_info["desc"],
+            "color": color,
+            "unit": prop_info["unit"]
+        })
     return json.dumps(result)
-@app.route("/dashboard/<sensor_name>")
-def dashboard(sensor_name):
-    """Страница дашборда для конкретного сенсора"""
-    logger.debug(f"Открытие дашборда для сенсора: {sensor_name}")
-    if sensor_name not in dashboard_data:
-        logger.error(f"Данные для сенсора '{sensor_name}' не найдены в dashboard_data")
-        return f"<h1>Данные для сенсора '{sensor_name.replace('_', ' ')}' не найдены</h1>", 404
-   
-    sensor_data = dashboard_data[sensor_name]
-    values = sensor_data['values']
-    obs_props = sensor_data['obs_props']
-    target_props = sensor_data['target_props']
-   
-    # Формируем данные для карточек (только температура, влажность, CO2)
-    current_data = {}
-    for prop in target_props:
-        prop_name = prop['name']
-        for v in values:
-            if v["prop"] == prop_name:
-                current_data[prop_name] = {
-                    'value': v['value'],
-                    'unit': v['unit'],
-                    'desc': prop['desc'],
-                    'color': prop['color'],
-                    'icon': prop['icon']
-                }
-                break
-   
+
+# ---------------- Роза ветров (агрегация) ----------------
+def build_wind_rose(dm_list, sm_list):
+    sm_by_ts = {ts: v for ts, v in sm_list}
+    pairs = [(ts, deg, sm_by_ts.get(ts)) for ts, deg in dm_list if ts in sm_by_ts and sm_by_ts.get(ts) is not None]
+    if not pairs:
+        return {"theta": [], "r": [], "c": []}
+
+    step = 22.5
+    bins = [i * step for i in range(16)]
+    def sector_center(deg):
+        d = deg % 360.0
+        idx = int((d + step/2) // step) % 16
+        return bins[idx] + step/2
+
+    sum_speed = defaultdict(float)
+    counts = defaultdict(int)
+    for _, deg, spd in pairs:
+        center = sector_center(deg)
+        counts[center] += 1
+        sum_speed[center] += spd
+
+    theta = sorted(counts.keys())
+    r = [counts[t] for t in theta]
+    c = [round(sum_speed[t]/counts[t], 2) for t in theta]
+    return {"theta": theta, "r": r, "c": c}
+
+# ---------------- Дашборд ----------------
+@app.route("/dashboard/<sensor_key>")
+def dashboard(sensor_key):
+    if sensor_key not in dashboard_data:
+        return f"<h3>Нет данных для {sensor_key}</h3>", 404
+
+    sensor = dashboard_data[sensor_key]
+    values = sensor.get("values", [])
+    obs_props = sensor.get("obs_props", [])
+    target_props = sensor.get("target_props", [])
+    title = sensor.get("title", sensor_key.replace('_',' '))
+    dm_series = sensor.get("dm_series", [])
+    sm_series = sensor.get("sm_series", [])
+    has_wind = bool(dm_series and sm_series)
+
+    current = {}
+    for tcfg in target_props:
+        pname = tcfg["name"]
+        v = next((vv for vv in values if vv["prop"] == pname), None)
+        if v:
+            current[pname] = {"value": v["value"], "unit": tcfg["unit"], "desc": tcfg["desc"], "icon": tcfg["icon"]}
+
+    dir_str = "—"
+    last_dm = None
+    last_sm = None
+    if has_wind:
+        last_dm = round(dm_series[0][1], 1)
+        last_sm = round(sm_series[0][1], 1)
+        dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW']
+        idx = int(((last_dm % 360) + 11.25) // 22.5) % 16
+        dir_str = f"{int(round(last_dm))}° ({dirs[idx]})"
+
+    rose = build_wind_rose(dm_series, sm_series) if has_wind else {"theta": [], "r": [], "c": []}
+
     sensors = list(dashboard_data.keys())
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
-    dropdown_html = '''
-    <div class="dropdown me-3">
-        <button class="btn btn-light dropdown-toggle" type="button" id="sensorDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-            Выбрать сенсор
-        </button>
-        <ul class="dropdown-menu" aria-labelledby="sensorDropdown">
-    '''
-    for s in sensors:
-        safe_s = s.replace(' ', '_').replace('/', '_')
-        dropdown_html += f'''
-            <li><a class="dropdown-item" href="/dashboard/{safe_s}">
-                <img src="{icon_url}" alt="" width="20" height="20" class="me-2">{s.replace('_', ' ')}
-            </a></li>
-        '''
-    dropdown_html += '</ul></div>'
-   
-    dashboard_html = f'''
+
+    html = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Дашборд - {sensor_name.replace('_', ' ')}</title>
+    <title>Дашборд - {title}</title>
+    <meta charset="utf-8">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    <meta charset="utf-8">
     <style>
         body {{ background-color: #f8f9fa; color: #212529; }}
-        .navbar-brand {{ font-weight: 700; }}
-        .navbar-brand:hover {{ text-decoration: underline; }}
-        .navbar-dark.bg-primary {{ background-color: #2F4F4F !important; }}
-        .sensor-header {{ display: flex; align-items: center; gap: 15px; margin-left: auto; margin-right: 0; }}
-        .sensor-logo {{ width: 42px; height: 42px; border-radius: 8px; background: white; padding: 5px; }}
-        .navbar .container-fluid {{ display: flex; justify-content: space-between; align-items: center; }}
-        .metrics-container {{ display: flex; gap: 20px; margin-bottom: 25px; flex-wrap: wrap; }}
-        .metric-card {{ background: white; border: none; border-radius: 12px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); flex: 1; min-width: 180px; transition: transform 0.2s, box-shadow 0.2s; }}
-        .metric-card:hover {{ transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.1); }}
-        .metric-icon {{ font-size: 2.5rem; margin-bottom: 10px; }}
-        .metric-value {{ font-size: 2.2rem; font-weight: bold; margin-bottom: 5px; }}
-        .metric-label {{ font-size: 0.95em; opacity: 0.8; }}
-        .temp-card {{ background: rgba(200, 162, 200, 0.08); border-left: 4px solid {colors[0]}; }}
-        .temp-card .metric-icon {{ color: {colors[0]}; }}
-        .humidity-card {{ background: rgba(135, 206, 235, 0.08); border-left: 4px solid {colors[1]}; }}
-        .humidity-card .metric-icon {{ color: {colors[1]}; }}
-        .co2-card {{ background: rgba(95, 106, 121, 0.08); border-left: 4px solid {colors[2]}; }}
-        .co2-card .metric-icon {{ color: {colors[2]}; }}
-        .dropdown-container {{ background: white; border-radius: 12px; padding: 20px; margin-bottom: 25px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
-        .graph-card {{ background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); overflow: hidden; display: flex; flex-direction: column; width: 75%; margin: 0 auto 30px auto; min-height: 550px; }}
-        .graph-header {{ padding: 15px 20px; border-bottom: 1px solid #eee; }}
+        .navbar-dark.bg-primary {{ background-color: {DARK_GREEN} !important; }}
+        .navbar .container-fluid {{ padding-top: 6px; padding-bottom: 6px; }}
+        .navbar-brand {{ font-size: 0.95rem; }}
+        .sensor-header h2 {{ font-size: 1.1rem; margin: 0; white-space: nowrap; }}
+        .sensor-header {{ display: flex; align-items: center; gap: 10px; margin-left: auto; }}
+        .sensor-logo {{ width: 32px; height: 32px; border-radius: 8px; background: white; padding: 4px; }}
+
+        .metrics-container {{ display: flex; gap: 20px; margin: 16px 0 18px 0; flex-wrap: wrap; }}
+        .metric-card {{ background: white; border: none; border-radius: 12px; padding: 18px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.05); flex: 1; min-width: 260px; }}
+        .metric-icon {{ font-size: 2rem; margin-bottom: 6px; }}
+        .metric-value {{ font-size: 2.0rem; font-weight: 700; }}
+        .metric-label {{ opacity: .8; }}
+        .temp-card {{ background: rgba(200,162,200,0.08); border-left: 4px solid {colors[0]}; }}
+        .humidity-card {{ background: rgba(135,206,235,0.08); border-left: 4px solid {colors[1]}; }}
+        .pressure-card {{ background: rgba(95,106,121,0.08); border-left: 4px solid {colors[2]}; }}
+
+        .wind-row {{ display:flex; gap:18px; align-items:stretch; margin-bottom:16px; }}
+        .wind-widget {{ flex:1; display:flex; gap:16px; align-items:center; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }}
+        .rose-card {{ flex:1; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }}
+        @media (max-width: 992px) {{ .wind-row {{ flex-direction: column; }} }}
+
+        .wind-face {{ width:160px; height:160px; border-radius:50%;
+                      background:radial-gradient(circle at 50% 50%, #fff, #f3f4f6);
+                      border:1px solid #e5e7eb; position:relative; }}
+        .wind-face .tick {{ position:absolute; width:2px; height:8px; background:#c7c7c7;
+                            left:calc(50% - 1px); top:6px; transform-origin:1px 66px; }}
+        .wind-face .label {{ position:absolute; font-weight:600; color:#5b6169; font-size:12px; }}
+        .wind-needle {{ position:absolute; left:50%; top:50%; width:0; height:0; transform-origin:0 0; }}
+        .wind-needle svg {{ transform: translate(-5px, -68px); }}
+
+        .graph-section {{ display:flex; gap:18px; align-items:stretch; }}
+        .graph-wrap {{ flex:1; }}
+        .metrics-sidebar {{ width:340px; }}
+        .sidebar-inner {{ background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); position:sticky; top:12px; }}
+        @media (max-width: 992px) {{
+            .graph-section {{ flex-direction: column; }}
+            .metrics-sidebar {{ width:auto; }}
+        }}
+
+        .wrap-select {{ font-size: 0.92rem; line-height: 1.35; }}
+        .wrap-select option {{ font-size: 0.92rem; line-height: 1.35; white-space: normal; word-break: break-word; }}
+
+        .graph-card {{ background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+                       overflow: hidden; display: flex; flex-direction: column; width: 100%; min-height: 520px; }}
+        .graph-header {{ padding: 12px 16px; border-bottom: 1px solid #eee; }}
         .graph-title {{ font-weight: 600; margin-bottom: 0; }}
         .graph-body {{ padding: 0; flex: 1; }}
         #plotly-graph {{ height: 100% !important; width: 100% !important; }}
-        @media (max-width: 768px) {{ .graph-card {{ width: 100%; margin-bottom: 5px; }} }}
     </style>
 </head>
 <body>
@@ -491,164 +677,226 @@ def dashboard(sensor_name):
         <div class="container-fluid">
             <a class="navbar-brand" href="/">← Назад к карте сенсоров</a>
             <div class="sensor-header">
-                {dropdown_html}
+                <div class="dropdown me-2">
+                    <button class="btn btn-light btn-sm dropdown-toggle" type="button" id="sensorDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                        Выбрать сенсор
+                    </button>
+                    <ul class="dropdown-menu" aria-labelledby="sensorDropdown">
+"""
+    for s in sensors:
+        display = dashboard_data[s].get("title", s.replace('_', ' '))
+        html += f'<li><a class="dropdown-item" href="/dashboard/{s}"><img src="{icon_url}" alt="" width="18" height="18" class="me-2">{display}</a></li>'
+
+    html += f"""
+                    </ul>
+                </div>
                 <img src="{icon_url}" class="sensor-logo" alt="Sensor">
-                <h2 class="text-white mb-0">{sensor_name.replace('_', ' ')}</h2>
+                <h2 class="text-white mb-0">{title}</h2>
             </div>
         </div>
     </nav>
-    <div class="container mt-4">
+
+    <div class="container mt-3">
         <div class="metrics-container">
-    '''
-    for prop_name, data in current_data.items():
-        class_name = {"ApparentTemperature": "temp-card", "Humidity": "humidity-card", "CO2": "co2-card"}.get(prop_name, "")
-        dashboard_html += f'''
-            <div class="metric-card {class_name}">
-                <div class="metric-icon"><i class="bi bi-{data['icon']}"></i></div>
-                <div class="metric-value">{round(data['value'], 1)}{data['unit']}</div>
-                <div class="metric-label">{data['desc']}</div>
+"""
+    def card(html_acc, key, cls):
+        d = current[key]
+        return html_acc + f"""
+            <div class="metric-card {cls}">
+                <div class="metric-icon"><i class="bi bi-{d['icon']}"></i></div>
+                <div class="metric-value">{round(d["value"],1)}{d["unit"]}</div>
+                <div class="metric-label">{d["desc"]}</div>
+            </div>"""
+
+    if "Ta" in current:  html = card(html, "Ta", "temp-card")
+    if "Ua" in current:  html = card(html, "Ua", "humidity-card")
+    if "Pa" in current:  html = card(html, "Pa", "pressure-card")
+    if "ApparentTemperature" in current: html = card(html, "ApparentTemperature", "temp-card")
+    if "Humidity" in current:            html = card(html, "Humidity", "humidity-card")
+    if "CO2" in current:                 html = card(html, "CO2", "pressure-card")
+
+    html += "\n        </div>\n"
+
+    if has_wind:
+        html += f"""
+        <div class="wind-row">
+            <div class="wind-widget">
+                <div class="wind-face" id="wind-face">
+                    <div class="wind-needle" id="wind-needle"></div>
+                </div>
+                <div class="wind-info">
+                    <h5>Компас ветра</h5>
+                    <div class="text-muted">Последний замер</div>
+                    <div style="font-size:1.6rem; font-weight:700; margin-top:6px;">{(f"{last_sm:.1f} м/с" if last_sm is not None else "—")}</div>
+                    <div style='margin-top:6px;'>Направление: {dir_str}</div>
+                </div>
             </div>
-        '''
-    dashboard_html += f'''
-        </div>
-        <div class="dropdown-container">
-            <label for="metrics-select" class="form-label">Выберите параметры для отображения:</label>
-            <select class="form-select" id="metrics-select" multiple size="3">
-    '''
-    for prop in obs_props:
-        selected = "selected" if prop["name"] == "ApparentTemperature" else ""
-        dashboard_html += f'<option value="{prop["name"]}" {selected}>{prop["desc"]}</option>'
-    dashboard_html += f'''
-            </select>
-        </div>
-        <div class="graph-card">
-            <div class="graph-header">
-                <h5 class="graph-title">Измерения</h5>
+
+            <div class="rose-card">
+                <h5 class="mb-2">Роза ветров</h5>
+                <div id="wind-rose" style="height:240px;"></div>
             </div>
-            <div class="graph-body" id="plotly-graph"></div>
+        </div>
+        """
+
+    html += """
+        <div class="graph-section">
+            <div class="graph-wrap">
+                <div class="graph-card">
+                    <div class="graph-header">
+                        <h5 class="graph-title">Измерения</h5>
+                    </div>
+                    <div class="graph-body" id="plotly-graph"></div>
+                </div>
+            </div>
+            <aside class="metrics-sidebar">
+                <div class="sidebar-inner">
+                    <label for="metrics-select" class="form-label">Выберите параметры для отображения:</label>
+                    <select class="form-select wrap-select" id="metrics-select" multiple size="12">
+"""
+    for p in obs_props:
+        sel = ' selected' if p["name"] in ("Ta", "ApparentTemperature") else ''
+        html += f'<option value="{p["name"]}" title="{p["desc"]}"{sel}>{p["desc"]}</option>'
+
+    html += f"""
+                    </select>
+                </div>
+            </aside>
         </div>
     </div>
+
     <script>
-        function updateGraph() {{
-            var selectedMetrics = Array.from(document.getElementById('metrics-select').selectedOptions).map(option => option.value);
-            if (selectedMetrics.length === 0) {{
-                document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-warning">Выберите хотя бы один параметр</div>';
+        // Компас (деления + стрелка)
+        (function(){{
+            const face = document.getElementById('wind-face');
+            if (!face) return;
+            for (let a=0; a<360; a+=30){{
+                const t = document.createElement('div');
+                t.className='tick';
+                t.style.transform = "rotate(" + a + "deg)";
+                face.appendChild(t);
+            }}
+            const labels = [
+                ['N','50%','6px','translate(-50%,0)'],
+                ['E','calc(100% - 16px)','50%','translate(0,-50%)'],
+                ['S','50%','calc(100% - 16px)','translate(-50%,0)'],
+                ['W','6px','50%','translate(0,-50%)'],
+            ];
+            labels.forEach(([txt,left,top,tr])=>{{
+                const l=document.createElement('div');
+                l.className='label'; l.innerText=txt;
+                l.style.left=left; l.style.top=top; l.style.transform=tr; face.appendChild(l);
+            }});
+            const needle = document.getElementById('wind-needle');
+            const deg = {('null' if last_dm is None else f"{last_dm:.1f}")};
+            const spd = {('null' if last_sm is None else f"{last_sm:.1f}")};
+            if (deg !== null){{
+                const color = spd===null ? '{PALE_BLUE}' : (spd < 3 ? '{PALE_BLUE}' : (spd < 8 ? '{SLATE}' : '{DARK_GREEN}'));
+                needle.innerHTML =
+                    '<svg width="10" height="140" viewBox="0 0 10 140">' +
+                    '<polygon points="5,5 9,68 5,74 1,68" fill="'+color+'" />' +
+                    '<rect x="4" y="74" width="2" height="50" fill="'+color+'"></rect>' +
+                    '<circle cx="5" cy="74" r="4" fill="#333"></circle>' +
+                    '</svg>';
+                needle.style.transform = "rotate(" + deg + "deg)";
+            }}
+        }})();
+
+        function updateGraph(){{
+            var sel = Array.from(document.getElementById('metrics-select')?.selectedOptions || []).map(o => o.value);
+            if (!sel.length) {{
+                document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-warning m-3">Выберите хотя бы один параметр</div>';
                 return;
             }}
-            document.getElementById('plotly-graph').innerHTML = '<div class="d-flex justify-content-center py-5"><div class="spinner-border" role="status"><span class="visually-hidden">Загрузка...</span></div></div>';
             var params = new URLSearchParams();
-            params.append('metrics', JSON.stringify(selectedMetrics));
-            var xhttp = new XMLHttpRequest();
-            xhttp.onreadystatechange = function() {{
-                if (this.readyState === 4) {{
-                    if (this.status === 200) {{
-                        try {{
-                            var response = JSON.parse(this.responseText);
-                            var container = document.getElementById('plotly-graph');
-                            container.innerHTML = '';
-                            if (!response || response.length === 0) {{
-                                container.innerHTML = '<div class="alert alert-warning">Нет данных для отображения</div>';
-                                return;
-                            }}
-                            var traces = response.map(function(metricData) {{
-                                return {{
-                                    x: metricData.timestamps.map(ts => new Date(ts)),
-                                    y: metricData.values,
-                                    name: metricData.desc + (metricData.unit ? ' (' + metricData.unit + ')' : ''),
-                                    type: 'scatter',
-                                    mode: 'lines+markers',
-                                    line: {{ color: metricData.color, width: 2 }},
-                                    marker: {{ size: 4, color: metricData.color, symbol: 'circle' }},
-                                    hovertemplate: '<b>%{{y}}' + (metricData.unit ? ' ' + metricData.unit + ')' : '') + '</b><br>%{{x|%d %b %Y %H:%M}}<extra></extra>',
-                                    unit: metricData.unit || ''
-                                }};
-                            }});
-                            var allValues = response.flatMap(metric => metric.values);
-                            var minY = Math.min(...allValues);
-                            var maxY = Math.max(...allValues);
-                            var yRangePadding = (maxY - minY) * 0.1;
-                            var defaultYRange = [minY - yRangePadding, maxY + yRangePadding];
-                            var layout = {{
-                                margin: {{ t: 25, r: 250, b: 100, l: 60 }},
-                                font: {{ family: 'Inter', size: 12 }},
-                                showlegend: true,
-                                legend: {{ x: 1.02, xanchor: 'left', y: 1, bgcolor: 'rgba(255, 255, 255, 0.8)', bordercolor: '#ddd', borderwidth: 1 }},
-                                plot_bgcolor: '#ffffff',
-                                paper_bgcolor: '#ffffff',
-                                xaxis: {{
-                                    type: 'date',
-                                    tickformat: '%d',
-                                    showgrid: true,
-                                    gridcolor: '#f0f0f0',
-                                    zeroline: false,
-                                    tickangle: -30,
-                                    tickfont: {{ size: 11 }},
-                                    rangeslider: {{ visible: true, bgcolor: '#d3d3d3', bordercolor: '#888', borderwidth: 1, thickness: 0.1 }},
-                                    rangeselector: {{
-                                        buttons: [
-                                            {{ count: 1, label: '1д', step: 'day', stepmode: 'backward' }},
-                                            {{ count: 7, label: '7д', step: 'day', stepmode: 'backward' }},
-                                            {{ count: 1, label: '1м', step: 'month', stepmode: 'backward' }},
-                                            {{ count: 6, label: '6м', step: 'month', stepmode: 'backward' }},
-                                            {{ count: 1, label: '1г', step: 'year', stepmode: 'backward' }},
-                                            {{ step: 'all', label: 'Всё' }}
-                                        ],
-                                        x: 0,
-                                        xanchor: 'left',
-                                        y: 1.1,
-                                        yanchor: 'top',
-                                        bgcolor: '#d3d3d3',
-                                        activecolor: '#888',
-                                        bordercolor: '#888',
-                                        borderwidth: 1
-                                    }},
-                                    autorange: true
-                                }},
-                                yaxis: {{
-                                    title: 'Значения',
-                                    showgrid: true,
-                                    gridcolor: '#f0f0f0',
-                                    zeroline: false,
-                                    tickfont: {{ size: 11 }},
-                                    range: defaultYRange,
-                                    rangeselector: {{
-                                        buttons: [
-                                            {{ label: 'Полный', step: 'all', stepmode: 'backward', range: defaultYRange }},
-                                            {{ label: 'Средний', range: [minY + (maxY - minY) * 0.25, maxY - (maxY - minY) * 0.25] }},
-                                            {{ label: 'Узкий', range: [minY + (maxY - minY) * 0.4, maxY - (maxY - minY) * 0.4] }}
-                                        ],
-                                        x: 1.02,
-                                        xanchor: 'left',
-                                        y: 0.5,
-                                        yanchor: 'middle',
-                                        orientation: 'vertical',
-                                        bgcolor: '#d3d3d3',
-                                        activecolor: '#888',
-                                        bordercolor: '#888',
-                                        borderwidth: 1
-                                    }}
-                                }},
-                                hovermode: 'x unified'
-                            }};
-                            var config = {{ displayModeBar: true, displaylogo: false, responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d', 'autoScale2d', 'resetScale2d'] }};
-                            Plotly.newPlot('plotly-graph', traces, layout, config);
-                        }} catch(e) {{
-                            document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-danger">Ошибка при обработке данных: ' + e.message + '</div>';
-                        }}
-                    }} else {{
-                        document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-danger">Ошибка загрузки данных</div>';
-                    }}
+            params.append('metrics', JSON.stringify(sel));
+            fetch('/api/data/{sensor_key}?'+params.toString())
+            .then(r => r.json())
+            .then(resp => {{
+                var el = document.getElementById('plotly-graph');
+                if (!resp || !resp.length) {{
+                    el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>'; return;
                 }}
-            }};
-            xhttp.open("GET", "/api/data/{sensor_name}?" + params.toString(), true);
-            xhttp.send();
+                var traces = resp.map(m => ({{
+                    x: m.timestamps.map(ts => new Date(ts)),
+                    y: m.values,
+                    name: m.desc + (m.unit ? ' ('+m.unit+')' : ''),
+                    type: 'scatter', mode: 'lines+markers',
+                    line: {{ color: m.color, width: 2 }},
+                    marker: {{ size: 4, color: m.color, symbol: 'circle' }}
+                }}));
+                var allVals = resp.flatMap(m => m.values);
+                var minY = Math.min(...allVals), maxY = Math.max(...allVals);
+                var pad = (maxY - minY) * 0.1;
+                var layout = {{
+                    margin: {{ t: 25, r: 250, b: 100, l: 60 }},
+                    font: {{ family: 'Inter', size: 12 }},
+                    showlegend: true,
+                    legend: {{ x: 1.02, xanchor: 'left', y: 1, bgcolor: 'rgba(255,255,255,0.8)', bordercolor: '#ddd', borderwidth: 1 }},
+                    plot_bgcolor: '#ffffff', paper_bgcolor: '#ffffff',
+                    xaxis: {{
+                        type: 'date', tickangle: -30, showgrid: true, gridcolor: '#f0f0f0', zeroline: false,
+                        rangeslider: {{ visible: true, bgcolor: '#d3d3d3', bordercolor: '#888', borderwidth: 1, thickness: 0.1 }},
+                        rangeselector: {{
+                            buttons: [
+                                {{ count: 1, label: '1д', step: 'day', stepmode: 'backward' }},
+                                {{ count: 7, label: '7д', step: 'day', stepmode: 'backward' }},
+                                {{ count: 1, label: '1м', step: 'month', stepmode: 'backward' }},
+                                {{ count: 6, label: '6м', step: 'month', stepmode: 'backward' }},
+                                {{ count: 1, label: '1г', step: 'year', stepmode: 'backward' }},
+                                {{ step: 'all', label: 'Всё' }}
+                            ]
+                        }}
+                    }},
+                    yaxis: {{ automargin: true, range: [(isFinite(minY - pad)?(minY-pad):null), (isFinite(maxY + pad)?(maxY+pad):null)] }}
+                }};
+                Plotly.newPlot('plotly-graph', traces, layout, {{responsive:true}});
+            }})
+            .catch(() => {{
+                document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-danger m-3">Ошибка загрузки данных</div>';
+            }});
         }}
-        window.addEventListener('load', function() {{ updateGraph(); }});
-        document.getElementById('metrics-select').addEventListener('change', updateGraph);
+        document.getElementById('metrics-select')?.addEventListener('change', updateGraph);
+        window.onload = function(){{ updateGraph(); }};
+
+        // Роза ветров (если есть блок)
+        (function(){{
+            var el = document.getElementById('wind-rose');
+            if (!el) return;
+            var theta = {json.dumps(rose["theta"])};
+            var r = {json.dumps(rose["r"])};
+            var c = {json.dumps(rose["c"])};
+            if (!theta.length) {{
+                el.innerHTML = '<div class="alert alert-warning m-3">Недостаточно данных для розы ветров</div>';
+                return;
+            }}
+            var trace = {{
+                type: 'barpolar',
+                theta: theta,
+                r: r,
+                marker: {{ color: '{DARK_GREEN}', opacity: 0.85, line: {{ color: '{PALE_BLUE}', width: 1 }} }},
+                hovertemplate: 'Сектор %{{theta}}°<br>Частота: %{{r}}<br>Средняя скорость: %{{customdata}} м/с<extra></extra>',
+                customdata: c
+            }};
+            var layout = {{
+                polar: {{
+                    angularaxis: {{ direction: 'clockwise', thetaunit: 'degrees', tick0: 0, dtick: 45, gridcolor: '#e9ecef', linecolor: '#adb5bd' }},
+                    radialaxis: {{ gridcolor: '#e9ecef', linecolor: '#adb5bd' }},
+                    bgcolor: '#ffffff'
+                }},
+                margin: {{ t: 10, r: 10, b: 10, l: 10 }},
+                showlegend: false,
+                paper_bgcolor: '#ffffff',
+                font: {{ family: 'Inter' }}
+            }};
+            Plotly.newPlot('wind-rose', [trace], layout, {{responsive:true}});
+        }})();
     </script>
 </body>
 </html>
-'''
-    return dashboard_html
+"""
+    return html
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
