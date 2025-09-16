@@ -1,7 +1,7 @@
 # vis.py
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 import folium
@@ -323,27 +323,24 @@ def root_map():
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
     # ----- RUDN (MultiDatastreams)
-    # since = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d') + "T00:00:00%2B03:00"
-
-    url_rudn = (
-        "http://94.154.11.74/frost/v1.1/Locations?"
-        "$expand=Things("
-        "$expand=MultiDatastreams("
-        "$expand=Observations("
-        "$orderby=phenomenonTime desc"
-        # ";$top=5000"                 # лимит по количеству (убрано)
-        # f";$filter=phenomenonTime ge {since}"  # фильтр по дате (убрано)
-        ")"
-        ")"
-        ")"
-    )
-
+    since = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+    url_rudn = f"http://94.154.11.74/frost/v1.1/Locations?" \
+          f"$expand=Things(" \
+          f"$expand=MultiDatastreams(" \
+          f"$expand=Observations(" \
+          f"$top=80000;" \
+          f"$count=true;" \
+          f"$orderby=phenomenonTime desc;" \
+          f"$filter=phenomenonTime ge {since}T00:00:00%2B03:00" \
+          f")" \
+          f")" \
+          f")"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
-        resp = requests.get(url_rudn, timeout=25)
+        resp = requests.get(url_rudn, timeout=200)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
+    except Exception:
         logger.exception("Ошибка запроса RUDN")
         data = {"value": []}
 
@@ -423,7 +420,7 @@ def root_map():
         resp2 = requests.get(url_ds, timeout=25)
         resp2.raise_for_status()
         data2 = resp2.json()
-    except Exception as e:
+    except Exception:
         logger.exception("Ошибка запроса второго сервера")
         data2 = {"value": []}
 
@@ -510,6 +507,60 @@ def root_map():
 
     return render_template_string(m._repr_html_())
 
+# ---------------- ВСПОМОГАТЕЛЬНО: ISO8601 и ПОЧАСОВАЯ АГРЕГАЦИЯ ----------------
+def _parse_iso_phen_time(ts: str):
+    """
+    Возвращает datetime для конца интервала измерения.
+    Поддерживает формат:
+      - '2025-09-15T10:05:00+03:00'
+      - '2025-09-15T10:05:00Z'
+      - '2025-09-15T10:05:00+03:00/2025-09-15T10:10:00+03:00' (берём правую границу)
+    """
+    if not ts:
+        return None
+    s = ts
+    if '/' in s:
+        s = s.split('/')[-1]
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            base = s.split('+')[0]
+        except Exception:
+            return None
+        try:
+            return datetime.fromisoformat(base)
+        except Exception:
+            return None
+
+def _hour_floor(dt: datetime) -> datetime:
+    if dt is None:
+        return None
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+def _aggregate_hourly_prop(prop_data):
+    """
+    На вход: список точек ОДНОГО параметра [{'timestamp':..., 'value': float}, ...]
+    На выход: (timestamps[], values[]) — средние по каждому часу (24 точки в сутки, для каждого дня отдельно).
+    """
+    sums = {}
+    counts = {}
+    for d in prop_data:
+        dt = _parse_iso_phen_time(d.get("timestamp"))
+        if dt is None:
+            continue
+        h = _hour_floor(dt)
+        key = h.isoformat()
+        sums[key] = sums.get(key, 0.0) + float(d["value"])
+        counts[key] = counts.get(key, 0) + 1
+    if not sums:
+        return [], []
+    keys_sorted = sorted(sums.keys())
+    vals = [sums[k] / counts[k] for k in keys_sorted]
+    return keys_sorted, vals
+
 # ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
@@ -518,6 +569,7 @@ def api_data(sensor_key):
     sensor = dashboard_data[sensor_key]
     values = sensor['values']
     obs_props = sensor['obs_props']
+    source = sensor.get("source", "")
 
     metrics_str = request.args.get('metrics')
     if not metrics_str:
@@ -539,10 +591,18 @@ def api_data(sensor_key):
             "desc": prop_name, "unit": "", "color": "#999999"
         })
         color = prop_info.get("color", "#999999")
+
+        # --- ДЛЯ RUDN ДЕЛАЕМ ПОЧАСОВУЮ АГРЕГАЦИЮ ---
+        if source == "RUDN":
+            ts_list, val_list = _aggregate_hourly_prop(prop_data)
+        else:
+            ts_list = [d["timestamp"] for d in prop_data]
+            val_list = [d["value"] for d in prop_data]
+
         result.append({
             "prop": prop_name,
-            "timestamps": [d["timestamp"] for d in prop_data],
-            "values": [d["value"] for d in prop_data],
+            "timestamps": ts_list,
+            "values": val_list,
             "desc": prop_info["desc"],
             "color": color,
             "unit": prop_info["unit"]
@@ -901,4 +961,4 @@ def dashboard(sensor_key):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5000)
