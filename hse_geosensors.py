@@ -51,7 +51,7 @@ TARGET_PROPS_RUDN = {
     "Pa": {"desc": "Атмосферное давление","color": colors[2], "unit": "hPa","icon": "cloud"},
 }
 
-# ---------------- DATASTREAM (второй сервер) ----------------
+# ---------------- DATASTREAM (наш сервер) ----------------
 TARGET_DS_LIST = [
     "Ощущаемая температура воздуха",
     "Влажность воздуха",
@@ -130,7 +130,7 @@ def get_latest_triplet_from_md(md) -> dict:
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
     """Сохраняем таймсерии + ветер под ключом MD__<loc>__<@iot.id>.
-       ВАЖНО: obs_props теперь содержит цвет из палитры для каждого свойства (не серый)."""
+       obs_props содержит цвет из палитры для каждого параметра"""
     md_id = str(md.get('@iot.id'))
     obs_list = md.get("Observations") or []
     if not obs_list or md_id is None:
@@ -138,7 +138,7 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
 
     values = []
     all_props = []
-    names_seen = set()  # чтобы не дублировать описания свойств
+    names_seen = set()
 
     dm_series, sm_series = [], []
 
@@ -198,7 +198,7 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
             "source": "RUDN"
         }
 
-# ---------- второй сервер helpers ----------
+# ---------- наш сервер helpers ----------
 def get_latest_observation_value_unit(datastream):
     obs = datastream.get('Observations') or []
     if not obs:
@@ -261,7 +261,7 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
             "obs_props": obs_props,
             "target_props": [TARGET_PROPS_DS[nm] for nm in TARGET_DS_LIST if nm in TARGET_PROPS_DS],
             "title": f"{thing_name}, {location_name}",
-            "dm_series": [],  # у этого сервера нет ветра в таком формате
+            "dm_series": [],  # нет данных ветра
             "sm_series": [],
             "source": "OTHER"
         }
@@ -322,19 +322,22 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    # ----- 1) RUDN (MultiDatastreams)
-    since = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d') + "T00:00:00%2B03:00"
+    # ----- RUDN (MultiDatastreams)
+    # since = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d') + "T00:00:00%2B03:00"
+
     url_rudn = (
         "http://94.154.11.74/frost/v1.1/Locations?"
         "$expand=Things("
-            "$expand=MultiDatastreams("
-                "$expand=Observations("
-                    "$top=500;$count=true;$orderby=phenomenonTime desc;"
-                    f"$filter=phenomenonTime ge {since}"
-                ")"
-            ")"
+        "$expand=MultiDatastreams("
+        "$expand=Observations("
+        "$orderby=phenomenonTime desc"
+        # ";$top=5000"                 # лимит по количеству (убрано)
+        # f";$filter=phenomenonTime ge {since}"  # фильтр по дате (убрано)
+        ")"
+        ")"
         ")"
     )
+
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
         resp = requests.get(url_rudn, timeout=25)
@@ -413,7 +416,7 @@ def root_map():
             icon=folium.CustomIcon(icon_url, icon_size=(32, 32), icon_anchor=(16, 32), popup_anchor=(0, -32))
         ).add_to(marker_cluster)
 
-    # ----- 2) Второй сервер (Datastreams)
+    # ----- Наш сервер (Datastreams)
     url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
     try:
         logger.debug("OTHER запрос: %s", url_ds)
@@ -821,9 +824,8 @@ def dashboard(sensor_key):
                     x: m.timestamps.map(ts => new Date(ts)),
                     y: m.values,
                     name: m.desc + (m.unit ? ' ('+m.unit+')' : ''),
-                    type: 'scatter', mode: 'lines+markers',
-                    line: {{ color: m.color, width: 2 }},
-                    marker: {{ size: 4, color: m.color, symbol: 'circle' }}
+                    type: 'scatter', mode: 'line',
+                    line: {{ color: m.color, width: 1.5 }}
                 }}));
                 var allVals = resp.flatMap(m => m.values);
                 var minY = Math.min(...allVals), maxY = Math.max(...allVals);
