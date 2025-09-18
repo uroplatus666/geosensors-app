@@ -1,4 +1,3 @@
-# vis.py
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -9,7 +8,6 @@ from folium.plugins import MarkerCluster
 from flask import Flask, render_template_string, request
 import requests
 
-# Геометрия/проекции для устойчивого чтения координат
 from shapely.geometry import shape, Point
 from shapely.ops import transform as shp_transform
 import pyproj
@@ -64,7 +62,6 @@ TARGET_PROPS_DS = {
 }
 
 # ---------------- ХРАНИЛИЩЕ ДЛЯ ДАШБОРДОВ ----------------
-# ключ: префикс + "<safe_location>__<id>"  (префикс MD__ или DS__)
 dashboard_data = {}
 
 # ---------------- УТИЛИТЫ ----------------
@@ -75,7 +72,6 @@ def is_epsg3857(x: float, y: float) -> bool:
     return abs(x) > 180 or abs(y) > 90
 
 def parse_location_coords(loc_obj):
-    """Возвращает (lat, lon) — устойчиво читает GeoJSON, Feature, value, либо lon/lat поля."""
     if not loc_obj:
         return None
     geo = None
@@ -129,8 +125,6 @@ def get_latest_triplet_from_md(md) -> dict:
     return out
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
-    """Сохраняем таймсерии + ветер под ключом MD__<loc>__<@iot.id>.
-       obs_props содержит цвет из палитры для каждого параметра"""
     md_id = str(md.get('@iot.id'))
     obs_list = md.get("Observations") or []
     if not obs_list or md_id is None:
@@ -151,8 +145,6 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
             if result[i] is None:
                 continue
             val = float(result[i])
-
-            # таймсерия по каждому свойству
             values.append({
                 "timestamp": ts,
                 "prop": prop["name"],
@@ -161,8 +153,6 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                 "unit": prop["unit"],
                 "color": colors[i % len(colors)]
             })
-
-            # метаданные свойства с цветом из палитры
             if prop["name"] not in names_seen:
                 all_props.append({
                     "name": prop["name"],
@@ -172,7 +162,6 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                 })
                 names_seen.add(prop["name"])
 
-        # отдельные серии для ветра
         if result[INDEX["Dm"]] is not None:
             dm_series.append((ts, float(result[INDEX["Dm"]])))
         if result[INDEX["Sm"]] is not None:
@@ -183,7 +172,7 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
         key = f"MD__{loc_key}__{md_id}"
         dashboard_data[key] = {
             "values": values,
-            "obs_props": all_props,  # содержит "color" для каждой метрики
+            "obs_props": all_props,
             "target_props": [
                 {"name": "Ta", "desc": TARGET_PROPS_RUDN["Ta"]["desc"], "icon": TARGET_PROPS_RUDN["Ta"]["icon"],
                  "color": TARGET_PROPS_RUDN["Ta"]["color"], "unit": TARGET_PROPS_RUDN["Ta"]["unit"]},
@@ -214,7 +203,6 @@ def get_latest_observation_value_unit(datastream):
         return None, unit
 
 def collect_timeseries_from_thing(location_name: str, thing) -> None:
-    """Сохраняем датastream-временные ряды под ключом DS__<loc>__<thingName>."""
     thing_name = thing.get('name', f"Thing-{thing.get('@iot.id')}")
     datastreams = thing.get('Datastreams') or []
     if not datastreams:
@@ -261,7 +249,7 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
             "obs_props": obs_props,
             "target_props": [TARGET_PROPS_DS[nm] for nm in TARGET_DS_LIST if nm in TARGET_PROPS_DS],
             "title": f"{thing_name}, {location_name}",
-            "dm_series": [],  # нет данных ветра
+            "dm_series": [],
             "sm_series": [],
             "source": "OTHER"
         }
@@ -322,19 +310,21 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    # ----- RUDN (MultiDatastreams)
+    # RUDN: один запрос с $expand за 180 дней (как было)
     since = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
-    url_rudn = f"http://94.154.11.74/frost/v1.1/Locations?" \
-          f"$expand=Things(" \
-          f"$expand=MultiDatastreams(" \
-          f"$expand=Observations(" \
-          f"$top=80000;" \
-          f"$count=true;" \
-          f"$orderby=phenomenonTime desc;" \
-          f"$filter=phenomenonTime ge {since}T00:00:00%2B03:00" \
-          f")" \
-          f")" \
-          f")"
+    url_rudn = (
+        "http://94.154.11.74/frost/v1.1/Locations?"
+        "$expand=Things("
+            "$expand=MultiDatastreams("
+                "$expand=Observations("
+                    "$top=80000;"
+                    "$count=true;"
+                    "$orderby=phenomenonTime desc;"
+                    f"$filter=phenomenonTime ge {since}T00:00:00%2B03:00"
+                ")"
+            ")"
+        ")"
+    )
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
         resp = requests.get(url_rudn, timeout=200)
@@ -413,7 +403,7 @@ def root_map():
             icon=folium.CustomIcon(icon_url, icon_size=(32, 32), icon_anchor=(16, 32), popup_anchor=(0, -32))
         ).add_to(marker_cluster)
 
-    # ----- Наш сервер (Datastreams)
+    # Второй сервер
     url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
     try:
         logger.debug("OTHER запрос: %s", url_ds)
@@ -459,10 +449,8 @@ def root_map():
                 datastreams = th.get('Datastreams') or []
                 key = f"DS__{make_safe_key(location_name)}__{make_safe_key(tname)}"
 
-                # Сохраняем таймсерии для дашборда
                 collect_timeseries_from_thing(location_name, th)
 
-                # карточки
                 latest_values = {}
                 for prop_title in TARGET_DS_LIST:
                     for ds in datastreams:
@@ -507,15 +495,8 @@ def root_map():
 
     return render_template_string(m._repr_html_())
 
-# ---------------- ВСПОМОГАТЕЛЬНО: ISO8601 и ПОЧАСОВАЯ АГРЕГАЦИЯ ----------------
+# ---------------- ВСПОМОГАТЕЛЬНО: парсинг времени и агрегации ----------------
 def _parse_iso_phen_time(ts: str):
-    """
-    Возвращает datetime для конца интервала измерения.
-    Поддерживает формат:
-      - '2025-09-15T10:05:00+03:00'
-      - '2025-09-15T10:05:00Z'
-      - '2025-09-15T10:05:00+03:00/2025-09-15T10:10:00+03:00' (берём правую границу)
-    """
     if not ts:
         return None
     s = ts
@@ -535,23 +516,21 @@ def _parse_iso_phen_time(ts: str):
         except Exception:
             return None
 
-def _hour_floor(dt: datetime) -> datetime:
-    if dt is None:
-        return None
-    return dt.replace(minute=0, second=0, microsecond=0)
+def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
+    epoch = datetime(1970, 1, 1, tzinfo=dt.tzinfo or timezone.utc)
+    sec = step_minutes * 60
+    t = dt.timestamp()
+    floored = int(t // sec) * sec
+    return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
 
-def _aggregate_hourly_prop(prop_data):
-    """
-    На вход: список точек ОДНОГО параметра [{'timestamp':..., 'value': float}, ...]
-    На выход: (timestamps[], values[]) — средние по каждому часу (24 точки в сутки, для каждого дня отдельно).
-    """
+def _aggregate_by_step(prop_data, step_minutes: int):
     sums = {}
     counts = {}
     for d in prop_data:
         dt = _parse_iso_phen_time(d.get("timestamp"))
         if dt is None:
             continue
-        h = _hour_floor(dt)
+        h = _floor_dt_step(dt, step_minutes)
         key = h.isoformat()
         sums[key] = sums.get(key, 0.0) + float(d["value"])
         counts[key] = counts.get(key, 0) + 1
@@ -561,15 +540,34 @@ def _aggregate_hourly_prop(prop_data):
     vals = [sums[k] / counts[k] for k in keys_sorted]
     return keys_sorted, vals
 
+def _parse_range_cutoff(range_str: str):
+    if not range_str or range_str.lower() in ("all", "всё", "все"):
+        return None
+    now = datetime.now(timezone.utc)
+    try:
+        s = range_str.strip().lower()
+        if s.endswith('d') or s.endswith('д'):
+            days = int(s[:-1])
+            return now - timedelta(days=days)
+        if s.endswith('h') or s.endswith('ч'):
+            hours = int(s[:-1])
+            return now - timedelta(hours=hours)
+        if s.endswith('m') or s.endswith('м'):
+            months = int(s[:-1])
+            return now - timedelta(days=30*months)
+    except Exception:
+        return None
+    return None
+
 # ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
     if sensor_key not in dashboard_data:
         return json.dumps([])
+
     sensor = dashboard_data[sensor_key]
     values = sensor['values']
     obs_props = sensor['obs_props']
-    source = sensor.get("source", "")
 
     metrics_str = request.args.get('metrics')
     if not metrics_str:
@@ -582,22 +580,55 @@ def api_data(sensor_key):
     except Exception:
         return json.dumps([])
 
+    # Параметры фильтрации/агрегации из запроса
+    range_str = request.args.get('range', '7d')
+    agg_str   = request.args.get('agg', '1h')  # по умолчанию 1ч
+    cutoff_dt = _parse_range_cutoff(range_str)
+
+    # допустимые шаги; минимальный — 1ч
+    agg_map = {"1h": 60, "3h": 180, "1d": 1440}
+
+    def _filter_by_cutoff(rows):
+        if cutoff_dt is None:
+            return rows
+        out = []
+        for d in rows:
+            dt = _parse_iso_phen_time(d.get("timestamp"))
+            if dt is None:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= cutoff_dt:
+                out.append(d)
+        return out
+
     result = []
     for prop_name in selected:
-        prop_data = [v for v in values if v["prop"] == prop_name]
+        prop_data_all = [v for v in values if v["prop"] == prop_name]
+        if not prop_data_all:
+            continue
+
+        prop_data = _filter_by_cutoff(prop_data_all)
         if not prop_data:
             continue
+
         prop_info = next((p for p in obs_props if p["name"] == prop_name), {
             "desc": prop_name, "unit": "", "color": "#999999"
         })
         color = prop_info.get("color", "#999999")
 
-        # --- ДЛЯ RUDN ДЕЛАЕМ ПОЧАСОВУЮ АГРЕГАЦИЮ ---
-        if source == "RUDN":
-            ts_list, val_list = _aggregate_hourly_prop(prop_data)
+        # Определяем шаг агрегации (RAW больше не поддерживается; "auto" => 1ч)
+        agg_key = (agg_str or "1h").lower()
+        if agg_key == "auto":
+            step_minutes = 60
+        elif agg_key == "raw":
+            # на случай старых ссылок — принудительно минимум 1ч
+            step_minutes = 60
         else:
-            ts_list = [d["timestamp"] for d in prop_data]
-            val_list = [d["value"] for d in prop_data]
+            step_minutes = agg_map.get(agg_key, 60)
+
+        # Всегда агрегируем (>= 1ч)
+        ts_list, val_list = _aggregate_by_step(prop_data, step_minutes)
 
         result.append({
             "prop": prop_name,
@@ -609,7 +640,7 @@ def api_data(sensor_key):
         })
     return json.dumps(result)
 
-# ---------------- Роза ветров (агрегация) ----------------
+# ---------------- Роза ветров ----------------
 def build_wind_rose(dm_list, sm_list):
     sm_by_ts = {ts: v for ts, v in sm_list}
     pairs = [(ts, deg, sm_by_ts.get(ts)) for ts, deg in dm_list if ts in sm_by_ts and sm_by_ts.get(ts) is not None]
@@ -729,7 +760,7 @@ def dashboard(sensor_key):
 
         .graph-card {{ background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);
                        overflow: hidden; display: flex; flex-direction: column; width: 100%; min-height: 520px; }}
-        .graph-header {{ padding: 12px 16px; border-bottom: 1px solid #eee; }}
+        .graph-header {{ padding: 12px 16px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }}
         .graph-title {{ font-weight: 600; margin-bottom: 0; }}
         .graph-body {{ padding: 0; flex: 1; }}
         #plotly-graph {{ height: 100% !important; width: 100% !important; }}
@@ -808,6 +839,24 @@ def dashboard(sensor_key):
                 <div class="graph-card">
                     <div class="graph-header">
                         <h5 class="graph-title">Измерения</h5>
+                        <!-- Контролы глубины и агрегации: RAW убран, минимум 1ч -->
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <label class="form-label mb-0 me-1">Глубина:</label>
+                            <select id="range-select" class="form-select form-select-sm">
+                                <option value="1d">1д</option>
+                                <option value="7d" selected>7д</option>
+                                <option value="30d">30д</option>
+                                <option value="90d">90д</option>
+                                <option value="180d">180д</option>
+                                <option value="all">Всё</option>
+                            </select>
+                            <label class="form-label mb-0 ms-2 me-1">Агрегация:</label>
+                            <select id="agg-select" class="form-select form-select-sm">
+                                <option value="1h" selected>1ч</option>
+                                <option value="3h">3ч</option>
+                                <option value="1d">1д</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="graph-body" id="plotly-graph"></div>
                 </div>
@@ -829,7 +878,7 @@ def dashboard(sensor_key):
     </div>
 
     <script>
-        // Компас (деления + стрелка)
+        // Компас
         (function(){{
             const face = document.getElementById('wind-face');
             if (!face) return;
@@ -866,31 +915,43 @@ def dashboard(sensor_key):
         }})();
 
         function updateGraph(){{
-            var sel = Array.from(document.getElementById('metrics-select')?.selectedOptions || []).map(o => o.value);
+            const sel = Array.from(document.getElementById('metrics-select')?.selectedOptions || []).map(o => o.value);
+            const el = document.getElementById('plotly-graph');
             if (!sel.length) {{
-                document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-warning m-3">Выберите хотя бы один параметр</div>';
+                el.innerHTML = '<div class="alert alert-warning m-3">Выберите хотя бы один параметр</div>';
                 return;
             }}
-            var params = new URLSearchParams();
+            const r = document.getElementById('range-select')?.value || '7d';
+            const a = document.getElementById('agg-select')?.value || '1h';
+
+            const params = new URLSearchParams();
             params.append('metrics', JSON.stringify(sel));
+            params.append('range', r);
+            params.append('agg', a);
+
             fetch('/api/data/{sensor_key}?'+params.toString())
             .then(r => r.json())
             .then(resp => {{
-                var el = document.getElementById('plotly-graph');
                 if (!resp || !resp.length) {{
-                    el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>'; return;
+                    el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>';
+                    return;
                 }}
-                var traces = resp.map(m => ({{
+                // Важно: очищаем контейнер перед построением, чтобы не оставалась надпись-плашка
+                el.innerHTML = '';
+
+                const traces = resp.map(m => ({{
                     x: m.timestamps.map(ts => new Date(ts)),
                     y: m.values,
                     name: m.desc + (m.unit ? ' ('+m.unit+')' : ''),
-                    type: 'scatter', mode: 'line',
+                    type: 'scatter', mode: 'lines',
                     line: {{ color: m.color, width: 1.5 }}
                 }}));
-                var allVals = resp.flatMap(m => m.values);
-                var minY = Math.min(...allVals), maxY = Math.max(...allVals);
-                var pad = (maxY - minY) * 0.1;
-                var layout = {{
+                const allVals = resp.flatMap(m => m.values);
+                const minY = allVals.length ? Math.min(...allVals) : null;
+                const maxY = allVals.length ? Math.max(...allVals) : null;
+                const pad = (minY!==null && maxY!==null) ? (maxY - minY) * 0.1 : 0;
+
+                const layout = {{
                     margin: {{ t: 25, r: 250, b: 100, l: 60 }},
                     font: {{ family: 'Inter', size: 12 }},
                     showlegend: true,
@@ -910,18 +971,26 @@ def dashboard(sensor_key):
                             ]
                         }}
                     }},
-                    yaxis: {{ automargin: true, range: [(isFinite(minY - pad)?(minY-pad):null), (isFinite(maxY + pad)?(maxY+pad):null)] }}
+                    yaxis: {{
+                        automargin: true,
+                        range: [
+                            {( "isFinite(minY - pad)?(minY-pad):null" )},
+                            {( "isFinite(maxY + pad)?(maxY+pad):null" )}
+                        ]
+                    }}
                 }};
                 Plotly.newPlot('plotly-graph', traces, layout, {{responsive:true}});
             }})
             .catch(() => {{
-                document.getElementById('plotly-graph').innerHTML = '<div class="alert alert-danger m-3">Ошибка загрузки данных</div>';
+                el.innerHTML = '<div class="alert alert-danger m-3">Ошибка загрузки данных</div>';
             }});
         }}
         document.getElementById('metrics-select')?.addEventListener('change', updateGraph);
+        document.getElementById('range-select')?.addEventListener('change', updateGraph);
+        document.getElementById('agg-select')?.addEventListener('change', updateGraph);
         window.onload = function(){{ updateGraph(); }};
 
-        // Роза ветров (если есть блок)
+        // Роза ветров
         (function(){{
             var el = document.getElementById('wind-rose');
             if (!el) return;
