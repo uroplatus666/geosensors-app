@@ -310,21 +310,7 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    # RUDN: один запрос с $expand за 180 дней (как было)
-    since = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
-    url_rudn = (
-        "http://94.154.11.74/frost/v1.1/Locations?"
-        "$expand=Things("
-            "$expand=MultiDatastreams("
-                "$expand=Observations("
-                    "$top=80000;"
-                    "$count=true;"
-                    "$orderby=phenomenonTime desc;"
-                    f"$filter=phenomenonTime ge {since}T00:00:00%2B03:00"
-                ")"
-            ")"
-        ")"
-    )
+    url_rudn = "http://94.154.11.74/frost/v1.1/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
         resp = requests.get(url_rudn, timeout=200)
@@ -407,7 +393,7 @@ def root_map():
     url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
     try:
         logger.debug("OTHER запрос: %s", url_ds)
-        resp2 = requests.get(url_ds, timeout=25)
+        resp2 = requests.get(url_ds, timeout=200)
         resp2.raise_for_status()
         data2 = resp2.json()
     except Exception:
