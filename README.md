@@ -3,4 +3,4 @@
 - http://94.154.11.74/frost/v1.1
 
 Flask-приложение было развернуто с помощью Yandex Cloud, Serverless Containers
-[Здесь])(https://bbau4bc4rnl6lkjbklbp.containers.yandexcloud.net/) можно посмотреть реализацию
+[Здесь](https://bbau4bc4rnl6lkjbklbp.containers.yandexcloud.net/) можно посмотреть реализацию
