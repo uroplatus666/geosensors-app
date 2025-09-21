@@ -310,10 +310,11 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    url_rudn = "http://94.154.11.74/frost/v1.1/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc)))"
+
+    url_rudn = "http://94.154.11.74/frost/v1.1/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
-        resp = requests.get(url_rudn, timeout=200)
+        resp = requests.get(url_rudn, timeout=300)
         resp.raise_for_status()
         data = resp.json()
     except Exception:
@@ -390,10 +391,10 @@ def root_map():
         ).add_to(marker_cluster)
 
     # Второй сервер
-    url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc)))"
+    url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("OTHER запрос: %s", url_ds)
-        resp2 = requests.get(url_ds, timeout=200)
+        resp2 = requests.get(url_ds, timeout=300)
         resp2.raise_for_status()
         data2 = resp2.json()
     except Exception:
