@@ -110,6 +110,117 @@ def parse_location_coords(loc_obj):
             return (float(lat), float(lon))
     return None
 
+# ---------- helpers: приведение результата к float ----------
+def _coerce_float_result(res):
+    """Вернёт float или None из разных представлений Observation.result."""
+    if res is None:
+        return None
+    if isinstance(res, (int, float)):
+        try:
+            return float(res)
+        except Exception:
+            return None
+    if isinstance(res, str):
+        s = res.strip().replace(',', '.')
+        try:
+            return float(s)
+        except Exception:
+            return None
+    if isinstance(res, dict):
+        for k in ("value", "result", "avg", "mean", "val"):
+            if k in res:
+                try:
+                    return _coerce_float_result(res[k])
+                except Exception:
+                    pass
+        return None
+    if isinstance(res, (list, tuple)):
+        for item in res:
+            v = _coerce_float_result(item)
+            if isinstance(v, (int, float)) and v is not None:
+                return float(v)
+        return None
+    return None
+
+# ---------------- ВСПОМОГАТЕЛЬНО: парсинг времени ----------------
+def _parse_iso_phen_time(ts: str):
+    if not ts:
+        return None
+    s = ts.strip()
+    # формат "start/end" -> берём конец
+    if '/' in s:
+        s = s.split('/')[-1]
+    # "Z" -> "+00:00"
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            base = s.split('+')[0]
+        except Exception:
+            return None
+        try:
+            return datetime.fromisoformat(base)
+        except Exception:
+            return None
+
+def _norm_key_10min(ts: str):
+    """Нормализованный ключ времени (к ближайшим 10 минутам вниз)."""
+    dt = _parse_iso_phen_time(ts)
+    if dt is None:
+        return None, None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    floored_min = (dt.minute // 10) * 10
+    ndt = dt.replace(minute=floored_min, second=0, microsecond=0)
+    return ndt.isoformat(), ndt
+
+def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
+    sec = step_minutes * 60
+    t = dt.timestamp()
+    floored = int(t // sec) * sec
+    return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
+
+# ---------------- АГРЕГАЦИИ ДЛЯ ГРАФИКОВ ----------------
+def _aggregate_by_step(prop_data, step_minutes: int):
+    sums = {}
+    counts = {}
+    for d in prop_data:
+        dt = _parse_iso_phen_time(d.get("timestamp"))
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        h = _floor_dt_step(dt, step_minutes)
+        key = h.isoformat()
+        sums[key] = sums.get(key, 0.0) + float(d["value"])
+        counts[key] = counts.get(key, 0) + 1
+    if not sums:
+        return [], []
+    keys_sorted = sorted(sums.keys())
+    vals = [sums[k] / counts[k] for k in keys_sorted]
+    return keys_sorted, vals
+
+def _parse_range_cutoff(range_str: str):
+    if not range_str or range_str.lower() in ("all", "всё", "все"):
+        return None
+    now = datetime.now(timezone.utc)
+    try:
+        s = range_str.strip().lower()
+        if s.endswith('d') or s.endswith('д'):
+            days = int(s[:-1])
+            return now - timedelta(days=days)
+        if s.endswith('h') or s.endswith('ч'):
+            hours = int(s[:-1])
+            return now - timedelta(hours=hours)
+        if s.endswith('m') or s.endswith('м'):
+            months = int(s[:-1])
+            return now - timedelta(days=30*months)
+    except Exception:
+        return None
+    return None
+
 # ---------- RUDN helpers ----------
 def get_latest_triplet_from_md(md) -> dict:
     obs_list = md.get("Observations") or []
@@ -138,13 +249,16 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
 
     for obs in obs_list:
         result = obs.get("result") or []
-        if len(result) != len(OBS_PROPS):
-            continue
         ts = obs.get("phenomenonTime")
-        for i, prop in enumerate(OBS_PROPS):
+        limit = min(len(result), len(OBS_PROPS))
+        for i in range(limit):
             if result[i] is None:
                 continue
-            val = float(result[i])
+            prop = OBS_PROPS[i]
+            try:
+                val = float(result[i])
+            except Exception:
+                continue
             values.append({
                 "timestamp": ts,
                 "prop": prop["name"],
@@ -162,10 +276,18 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                 })
                 names_seen.add(prop["name"])
 
-        if result[INDEX["Dm"]] is not None:
-            dm_series.append((ts, float(result[INDEX["Dm"]])))
-        if result[INDEX["Sm"]] is not None:
-            sm_series.append((ts, float(result[INDEX["Sm"]])))
+        idx_dm = INDEX["Dm"]
+        idx_sm = INDEX["Sm"]
+        if idx_dm < len(result) and result[idx_dm] is not None:
+            try:
+                dm_series.append((ts, float(result[idx_dm])))
+            except Exception:
+                pass
+        if idx_sm < len(result) and result[idx_sm] is not None:
+            try:
+                sm_series.append((ts, float(result[idx_sm])))
+            except Exception:
+                pass
 
     if values:
         loc_key = make_safe_key(location_name)
@@ -182,8 +304,8 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                  "color": TARGET_PROPS_RUDN["Pa"]["color"], "unit": TARGET_PROPS_RUDN["Pa"]["unit"]},
             ],
             "title": f"{md_id}, {location_name}",
-            "dm_series": dm_series,
-            "sm_series": sm_series,
+            "dm_series": dm_series,   # [(ts_str, degrees)]
+            "sm_series": sm_series,   # [(ts_str, mps)]
             "source": "RUDN"
         }
 
@@ -193,14 +315,9 @@ def get_latest_observation_value_unit(datastream):
     if not obs:
         return None, ""
     latest = obs[0]
-    res = latest.get("result")
-    if res is None:
-        return None, ""
     unit = (datastream.get('unitOfMeasurement') or {}).get('symbol', '')
-    try:
-        return float(res), unit
-    except Exception:
-        return None, unit
+    v = _coerce_float_result(latest.get("result"))
+    return (float(v) if v is not None else None), unit
 
 def collect_timeseries_from_thing(location_name: str, thing) -> None:
     thing_name = thing.get('name', f"Thing-{thing.get('@iot.id')}")
@@ -225,17 +342,13 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
             obs_props.append(cfg)
 
         for ob in (ds.get('Observations') or []):
-            res = ob.get('result')
-            if res is None:
-                continue
-            try:
-                v = float(res)
-            except Exception:
+            v = _coerce_float_result(ob.get('result'))
+            if v is None:
                 continue
             values.append({
                 "timestamp": ob.get("phenomenonTime"),
                 "prop": cfg["name"],
-                "value": v,
+                "value": float(v),
                 "desc": cfg["desc"],
                 "unit": cfg["unit"],
                 "color": cfg["color"]
@@ -253,6 +366,69 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
             "sm_series": [],
             "source": "OTHER"
         }
+
+# ---------------- Спаривание ветра (Dm + Sm) ----------------
+def pair_wind(dm_list, sm_list):
+    """
+    Находит пары (направление, скорость) по почти совпадающим временам.
+    Время нормализуется к шагу 10 минут.
+    Возвращает список кортежей: (dt_norm: datetime, deg: float, spd: float), отсортированный по времени убыв.
+    """
+    dir_by_key = {}
+    spd_by_key = {}
+    key_dt_map = {}
+
+    # Направления
+    for ts, deg in dm_list or []:
+        key, ndt = _norm_key_10min(ts)
+        if key is None:
+            continue
+        # Сохраняем самый свежий для ключа
+        if (key not in dir_by_key) or (ndt > key_dt_map.get(("dir", key), datetime.min.replace(tzinfo=timezone.utc))):
+            dir_by_key[key] = float(deg)
+            key_dt_map[("dir", key)] = ndt
+
+    # Скорости
+    for ts, spd in sm_list or []:
+        key, ndt = _norm_key_10min(ts)
+        if key is None:
+            continue
+        if (key not in spd_by_key) or (ndt > key_dt_map.get(("spd", key), datetime.min.replace(tzinfo=timezone.utc))):
+            spd_by_key[key] = float(spd)
+            key_dt_map[("spd", key)] = ndt
+
+    pairs = []
+    for key in set(dir_by_key.keys()) & set(spd_by_key.keys()):
+        dt_norm = max(key_dt_map.get(("dir", key)), key_dt_map.get(("spd", key)))
+        pairs.append((dt_norm, dir_by_key[key], spd_by_key[key]))
+
+    # свежие первыми
+    pairs.sort(key=lambda t: t[0], reverse=True)
+    return pairs
+
+def build_wind_rose_from_pairs(pairs):
+    """Строит данные для розы ветров по уже спаренным наблюдениям."""
+    if not pairs:
+        return {"theta": [], "r": [], "c": []}
+
+    step = 22.5
+    bins = [i * step for i in range(16)]
+    def sector_center(deg):
+        d = deg % 360.0
+        idx = int((d + step/2) // step) % 16
+        return bins[idx] + step/2
+
+    sum_speed = defaultdict(float)
+    counts = defaultdict(int)
+    for _, deg, spd in pairs:
+        center = sector_center(deg)
+        counts[center] += 1
+        sum_speed[center] += spd
+
+    theta = sorted(counts.keys())
+    r = [counts[t] for t in theta]
+    c = [round(sum_speed[t]/counts[t], 2) for t in theta]
+    return {"theta": theta, "r": r, "c": c}
 
 # ---------------- Корневая карта: оба сервера ----------------
 @app.route("/")
@@ -310,7 +486,7 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-
+    # RUDN
     url_rudn = "http://94.154.11.74/frost/v1.1/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
@@ -409,7 +585,7 @@ def root_map():
             continue
         lat, lon = coords
 
-        things = loc.get('Things') or []
+        things = (loc.get('Things') or [])
         container_id = f"DS-{make_safe_key(location_name)}"
         popup_html = [f'<div id="{container_id}" class="sensor-popup"><h4>{location_name}</h4>']
 
@@ -482,70 +658,6 @@ def root_map():
 
     return render_template_string(m._repr_html_())
 
-# ---------------- ВСПОМОГАТЕЛЬНО: парсинг времени и агрегации ----------------
-def _parse_iso_phen_time(ts: str):
-    if not ts:
-        return None
-    s = ts
-    if '/' in s:
-        s = s.split('/')[-1]
-    if s.endswith('Z'):
-        s = s[:-1] + '+00:00'
-    try:
-        return datetime.fromisoformat(s)
-    except Exception:
-        try:
-            base = s.split('+')[0]
-        except Exception:
-            return None
-        try:
-            return datetime.fromisoformat(base)
-        except Exception:
-            return None
-
-def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
-    epoch = datetime(1970, 1, 1, tzinfo=dt.tzinfo or timezone.utc)
-    sec = step_minutes * 60
-    t = dt.timestamp()
-    floored = int(t // sec) * sec
-    return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
-
-def _aggregate_by_step(prop_data, step_minutes: int):
-    sums = {}
-    counts = {}
-    for d in prop_data:
-        dt = _parse_iso_phen_time(d.get("timestamp"))
-        if dt is None:
-            continue
-        h = _floor_dt_step(dt, step_minutes)
-        key = h.isoformat()
-        sums[key] = sums.get(key, 0.0) + float(d["value"])
-        counts[key] = counts.get(key, 0) + 1
-    if not sums:
-        return [], []
-    keys_sorted = sorted(sums.keys())
-    vals = [sums[k] / counts[k] for k in keys_sorted]
-    return keys_sorted, vals
-
-def _parse_range_cutoff(range_str: str):
-    if not range_str or range_str.lower() in ("all", "всё", "все"):
-        return None
-    now = datetime.now(timezone.utc)
-    try:
-        s = range_str.strip().lower()
-        if s.endswith('d') or s.endswith('д'):
-            days = int(s[:-1])
-            return now - timedelta(days=days)
-        if s.endswith('h') or s.endswith('ч'):
-            hours = int(s[:-1])
-            return now - timedelta(hours=hours)
-        if s.endswith('m') or s.endswith('м'):
-            months = int(s[:-1])
-            return now - timedelta(days=30*months)
-    except Exception:
-        return None
-    return None
-
 # ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
@@ -567,12 +679,10 @@ def api_data(sensor_key):
     except Exception:
         return json.dumps([])
 
-    # Параметры фильтрации/агрегации из запроса
     range_str = request.args.get('range', '7d')
-    agg_str   = request.args.get('agg', '1h')  # по умолчанию 1ч
+    agg_str   = request.args.get('agg', '1h')
     cutoff_dt = _parse_range_cutoff(range_str)
 
-    # допустимые шаги; минимальный — 1ч
     agg_map = {"1h": 60, "3h": 180, "1d": 1440}
 
     def _filter_by_cutoff(rows):
@@ -596,26 +706,34 @@ def api_data(sensor_key):
             continue
 
         prop_data = _filter_by_cutoff(prop_data_all)
+
+        # ФОЛБЭК: если пусто в заданной глубине — последние 200 точек
         if not prop_data:
-            continue
+            prop_data = sorted(
+                prop_data_all,
+                key=lambda d: _parse_iso_phen_time(d.get("timestamp")) or datetime.min
+            )[-200:]
+            if not prop_data:
+                continue
 
         prop_info = next((p for p in obs_props if p["name"] == prop_name), {
             "desc": prop_name, "unit": "", "color": "#999999"
         })
         color = prop_info.get("color", "#999999")
 
-        # Определяем шаг агрегации (RAW больше не поддерживается; "auto" => 1ч)
         agg_key = (agg_str or "1h").lower()
-        if agg_key == "auto":
-            step_minutes = 60
-        elif agg_key == "raw":
-            # на случай старых ссылок — принудительно минимум 1ч
-            step_minutes = 60
-        else:
-            step_minutes = agg_map.get(agg_key, 60)
+        step_minutes = 60 if agg_key in ("auto", "raw") else agg_map.get(agg_key, 60)
 
-        # Всегда агрегируем (>= 1ч)
         ts_list, val_list = _aggregate_by_step(prop_data, step_minutes)
+
+        # Если агрегация дала пусто (парсинг времени не удался) — вернём «сырые» точки
+        if not ts_list and prop_data:
+            prop_data_sorted = sorted(
+                prop_data,
+                key=lambda d: _parse_iso_phen_time(d.get("timestamp")) or datetime.min
+            )
+            ts_list = [d["timestamp"] for d in prop_data_sorted]
+            val_list = [d["value"] for d in prop_data_sorted]
 
         result.append({
             "prop": prop_name,
@@ -626,32 +744,6 @@ def api_data(sensor_key):
             "unit": prop_info["unit"]
         })
     return json.dumps(result)
-
-# ---------------- Роза ветров ----------------
-def build_wind_rose(dm_list, sm_list):
-    sm_by_ts = {ts: v for ts, v in sm_list}
-    pairs = [(ts, deg, sm_by_ts.get(ts)) for ts, deg in dm_list if ts in sm_by_ts and sm_by_ts.get(ts) is not None]
-    if not pairs:
-        return {"theta": [], "r": [], "c": []}
-
-    step = 22.5
-    bins = [i * step for i in range(16)]
-    def sector_center(deg):
-        d = deg % 360.0
-        idx = int((d + step/2) // step) % 16
-        return bins[idx] + step/2
-
-    sum_speed = defaultdict(float)
-    counts = defaultdict(int)
-    for _, deg, spd in pairs:
-        center = sector_center(deg)
-        counts[center] += 1
-        sum_speed[center] += spd
-
-    theta = sorted(counts.keys())
-    r = [counts[t] for t in theta]
-    c = [round(sum_speed[t]/counts[t], 2) for t in theta]
-    return {"theta": theta, "r": r, "c": c}
 
 # ---------------- Дашборд ----------------
 @app.route("/dashboard/<sensor_key>")
@@ -664,10 +756,14 @@ def dashboard(sensor_key):
     obs_props = sensor.get("obs_props", [])
     target_props = sensor.get("target_props", [])
     title = sensor.get("title", sensor_key.replace('_',' '))
-    dm_series = sensor.get("dm_series", [])
-    sm_series = sensor.get("sm_series", [])
-    has_wind = bool(dm_series and sm_series)
+    dm_series = sensor.get("dm_series", [])  # [(ts, deg)]
+    sm_series = sensor.get("sm_series", [])  # [(ts, mps)]
 
+    # Спариваем ветер
+    wind_pairs = pair_wind(dm_series, sm_series)  # [(dt_norm, deg, spd)]
+    has_wind = bool(wind_pairs)
+
+    # Текущие карточки
     current = {}
     for tcfg in target_props:
         pname = tcfg["name"]
@@ -675,17 +771,20 @@ def dashboard(sensor_key):
         if v:
             current[pname] = {"value": v["value"], "unit": tcfg["unit"], "desc": tcfg["desc"], "icon": tcfg["icon"]}
 
+    # Последние направление/скорость (по паре)
     dir_str = "—"
     last_dm = None
     last_sm = None
     if has_wind:
-        last_dm = round(dm_series[0][1], 1)
-        last_sm = round(sm_series[0][1], 1)
+        _, last_deg, last_spd = wind_pairs[0]
+        last_dm = round(float(last_deg), 1)
+        last_sm = round(float(last_spd), 1)
         dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW']
         idx = int(((last_dm % 360) + 11.25) // 22.5) % 16
         dir_str = f"{int(round(last_dm))}° ({dirs[idx]})"
 
-    rose = build_wind_rose(dm_series, sm_series) if has_wind else {"theta": [], "r": [], "c": []}
+    # Данные для розы
+    rose = build_wind_rose_from_pairs(wind_pairs) if has_wind else {"theta": [], "r": [], "c": []}
 
     sensors = list(dashboard_data.keys())
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
@@ -798,6 +897,7 @@ def dashboard(sensor_key):
 
     html += "\n        </div>\n"
 
+    # ----- Блок ветра (если есть пары) -----
     if has_wind:
         html += f"""
         <div class="wind-row">
@@ -807,7 +907,7 @@ def dashboard(sensor_key):
                 </div>
                 <div class="wind-info">
                     <h5>Компас ветра</h5>
-                    <div class="text-muted">Последний замер</div>
+                    <div class="text-muted"> </div>
                     <div style="font-size:1.6rem; font-weight:700; margin-top:6px;">{(f"{last_sm:.1f} м/с" if last_sm is not None else "—")}</div>
                     <div style='margin-top:6px;'>Направление: {dir_str}</div>
                 </div>
@@ -820,13 +920,12 @@ def dashboard(sensor_key):
         </div>
         """
 
-    html += """
+    html += f"""
         <div class="graph-section">
             <div class="graph-wrap">
                 <div class="graph-card">
                     <div class="graph-header">
                         <h5 class="graph-title">Измерения</h5>
-                        <!-- Контролы глубины и агрегации: RAW убран, минимум 1ч -->
                         <div class="d-flex align-items-center gap-2 flex-wrap">
                             <label class="form-label mb-0 me-1">Глубина:</label>
                             <select id="range-select" class="form-select form-select-sm">
@@ -853,8 +952,8 @@ def dashboard(sensor_key):
                     <label for="metrics-select" class="form-label">Выберите параметры для отображения:</label>
                     <select class="form-select wrap-select" id="metrics-select" multiple size="12">
 """
-    for p in obs_props:
-        sel = ' selected' if p["name"] in ("Ta", "ApparentTemperature") else ''
+    for idx, p in enumerate(obs_props):
+        sel = ' selected' if idx == 0 else ''
         html += f'<option value="{p["name"]}" title="{p["desc"]}"{sel}>{p["desc"]}</option>'
 
     html += f"""
@@ -865,7 +964,7 @@ def dashboard(sensor_key):
     </div>
 
     <script>
-        // Компас
+        // Компас — рисуем если есть значения
         (function(){{
             const face = document.getElementById('wind-face');
             if (!face) return;
@@ -901,9 +1000,25 @@ def dashboard(sensor_key):
             }}
         }})();
 
+        // Графики
+        function ensureSelection() {{
+          const selEl = document.getElementById('metrics-select');
+          if (!selEl) return false;
+          const selected = Array.from(selEl.selectedOptions || []);
+          if (selected.length > 0) return false;
+          if (selEl.options.length > 0) {{ selEl.options[0].selected = true; return true; }}
+          return false;
+        }}
+
         function updateGraph(){{
-            const sel = Array.from(document.getElementById('metrics-select')?.selectedOptions || []).map(o => o.value);
-            const el = document.getElementById('plotly-graph');
+            const changedByEnsure = ensureSelection();
+
+            const selEl = document.getElementById('metrics-select');
+            const sel = Array.from(selEl?.selectedOptions || []).map(o => o.value);
+            const el  = document.getElementById('plotly-graph');
+
+            el.innerHTML = '<div class="m-3 text-muted">Загрузка…</div>';
+
             if (!sel.length) {{
                 el.innerHTML = '<div class="alert alert-warning m-3">Выберите хотя бы один параметр</div>';
                 return;
@@ -920,10 +1035,13 @@ def dashboard(sensor_key):
             .then(r => r.json())
             .then(resp => {{
                 if (!resp || !resp.length) {{
+                    if (!changedByEnsure) {{
+                        const changed = ensureSelection();
+                        if (changed) return updateGraph();
+                    }}
                     el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>';
                     return;
                 }}
-                // Важно: очищаем контейнер перед построением, чтобы не оставалась надпись-плашка
                 el.innerHTML = '';
 
                 const traces = resp.map(m => ({{
@@ -933,12 +1051,13 @@ def dashboard(sensor_key):
                     type: 'scatter', mode: 'lines',
                     line: {{ color: m.color, width: 1.5 }}
                 }}));
-                const allVals = resp.flatMap(m => m.values);
+
+                const allVals = resp.flatMap(m => m.values).filter(v => Number.isFinite(v));
                 const minY = allVals.length ? Math.min(...allVals) : null;
                 const maxY = allVals.length ? Math.max(...allVals) : null;
                 const pad = (minY!==null && maxY!==null) ? (maxY - minY) * 0.1 : 0;
 
-                const layout = {{
+                Plotly.newPlot('plotly-graph', traces, {{
                     margin: {{ t: 25, r: 250, b: 100, l: 60 }},
                     font: {{ family: 'Inter', size: 12 }},
                     showlegend: true,
@@ -961,12 +1080,11 @@ def dashboard(sensor_key):
                     yaxis: {{
                         automargin: true,
                         range: [
-                            {( "isFinite(minY - pad)?(minY-pad):null" )},
-                            {( "isFinite(maxY + pad)?(maxY+pad):null" )}
+                            (Number.isFinite(minY - pad)?(minY-pad):null),
+                            (Number.isFinite(maxY + pad)?(maxY+pad):null)
                         ]
                     }}
-                }};
-                Plotly.newPlot('plotly-graph', traces, layout, {{responsive:true}});
+                }}, {{responsive:true}});
             }})
             .catch(() => {{
                 el.innerHTML = '<div class="alert alert-danger m-3">Ошибка загрузки данных</div>';
