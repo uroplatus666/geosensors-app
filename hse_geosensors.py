@@ -803,7 +803,7 @@ def dashboard(sensor_key):
         body {{ background-color: #f8f9fa; color: #212529; }}
         .navbar-dark.bg-primary {{ background-color: {DARK_GREEN} !important; }}
         .navbar .container-fluid {{ padding-top: 6px; padding-bottom: 6px; }}
-        .navbar-brand {{ font-size: 0.95rem; }}
+        .navbar-brand {{ font-size: 0.95rem; cursor: pointer; }}
         .sensor-header h2 {{ font-size: 1.1rem; margin: 0; white-space: nowrap; }}
         .sensor-header {{ display: flex; align-items: center; gap: 10px; margin-left: auto; }}
         .sensor-logo {{ width: 32px; height: 32px; border-radius: 8px; background: white; padding: 4px; }}
@@ -855,7 +855,7 @@ def dashboard(sensor_key):
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/">← Назад к карте сенсоров</a>
+            <a class="navbar-brand" href="/" onclick="if (history.length > 1) {{ history.back(); return false; }} else {{ return true; }}">← Назад к карте сенсоров</a>
             <div class="sensor-header">
                 <div class="dropdown me-2">
                     <button class="btn btn-light btn-sm dropdown-toggle" type="button" id="sensorDropdown" data-bs-toggle="dropdown" aria-expanded="false">
@@ -1020,7 +1020,7 @@ def dashboard(sensor_key):
             el.innerHTML = '<div class="m-3 text-muted">Загрузка…</div>';
 
             if (!sel.length) {{
-                el.innerHTML = '<div class="alert alert-warning m-3">Выберите хотя бы один параметр</div>';
+                el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>';
                 return;
             }}
             const r = document.getElementById('range-select')?.value || '7d';
