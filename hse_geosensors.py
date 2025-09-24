@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,11 @@ logger = logging.getLogger("vis")
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 app.config["CACHE_TYPE"] = "null"
+
+# ---------------- ENV ----------------
+RUDN_BASE_URL  = os.getenv("RUDN_BASE_URL",  "http://94.154.11.74/frost/v1.1")
+OTHER_BASE_URL = os.getenv("OTHER_BASE_URL", "http://90.156.134.128:8080/FROST-Server/v1.1")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 
 # ---------------- ПАЛИТРА ----------------
 colors = [
@@ -110,9 +116,7 @@ def parse_location_coords(loc_obj):
             return (float(lat), float(lon))
     return None
 
-# ---------- helpers: приведение результата к float ----------
 def _coerce_float_result(res):
-    """Вернёт float или None из разных представлений Observation.result."""
     if res is None:
         return None
     if isinstance(res, (int, float)):
@@ -142,15 +146,12 @@ def _coerce_float_result(res):
         return None
     return None
 
-# ---------------- ВСПОМОГАТЕЛЬНО: парсинг времени ----------------
 def _parse_iso_phen_time(ts: str):
     if not ts:
         return None
     s = ts.strip()
-    # формат "start/end" -> берём конец
     if '/' in s:
         s = s.split('/')[-1]
-    # "Z" -> "+00:00"
     if s.endswith('Z'):
         s = s[:-1] + '+00:00'
     try:
@@ -166,7 +167,6 @@ def _parse_iso_phen_time(ts: str):
             return None
 
 def _norm_key_10min(ts: str):
-    """Нормализованный ключ времени (к ближайшим 10 минутам вниз)."""
     dt = _parse_iso_phen_time(ts)
     if dt is None:
         return None, None
@@ -182,7 +182,6 @@ def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
     floored = int(t // sec) * sec
     return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
 
-# ---------------- АГРЕГАЦИИ ДЛЯ ГРАФИКОВ ----------------
 def _aggregate_by_step(prop_data, step_minutes: int):
     sums = {}
     counts = {}
@@ -232,7 +231,10 @@ def get_latest_triplet_from_md(md) -> dict:
     for k in ["Ta", "Ua", "Pa"]:
         idx = INDEX.get(k)
         if idx is not None and idx < len(result) and result[idx] is not None:
-            out[k] = (float(result[idx]), TARGET_PROPS_RUDN[k]["unit"])
+            try:
+                out[k] = (float(result[idx]), TARGET_PROPS_RUDN[k]["unit"])
+            except Exception:
+                pass
     return out
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
@@ -304,8 +306,8 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                  "color": TARGET_PROPS_RUDN["Pa"]["color"], "unit": TARGET_PROPS_RUDN["Pa"]["unit"]},
             ],
             "title": f"{md_id}, {location_name}",
-            "dm_series": dm_series,   # [(ts_str, degrees)]
-            "sm_series": sm_series,   # [(ts_str, mps)]
+            "dm_series": dm_series,
+            "sm_series": sm_series,
             "source": "RUDN"
         }
 
@@ -369,26 +371,18 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
 
 # ---------------- Спаривание ветра (Dm + Sm) ----------------
 def pair_wind(dm_list, sm_list):
-    """
-    Находит пары (направление, скорость) по почти совпадающим временам.
-    Время нормализуется к шагу 10 минут.
-    Возвращает список кортежей: (dt_norm: datetime, deg: float, spd: float), отсортированный по времени убыв.
-    """
     dir_by_key = {}
     spd_by_key = {}
     key_dt_map = {}
 
-    # Направления
     for ts, deg in dm_list or []:
         key, ndt = _norm_key_10min(ts)
         if key is None:
             continue
-        # Сохраняем самый свежий для ключа
         if (key not in dir_by_key) or (ndt > key_dt_map.get(("dir", key), datetime.min.replace(tzinfo=timezone.utc))):
             dir_by_key[key] = float(deg)
             key_dt_map[("dir", key)] = ndt
 
-    # Скорости
     for ts, spd in sm_list or []:
         key, ndt = _norm_key_10min(ts)
         if key is None:
@@ -402,12 +396,10 @@ def pair_wind(dm_list, sm_list):
         dt_norm = max(key_dt_map.get(("dir", key)), key_dt_map.get(("spd", key)))
         pairs.append((dt_norm, dir_by_key[key], spd_by_key[key]))
 
-    # свежие первыми
     pairs.sort(key=lambda t: t[0], reverse=True)
     return pairs
 
 def build_wind_rose_from_pairs(pairs):
-    """Строит данные для розы ветров по уже спаренным наблюдениям."""
     if not pairs:
         return {"theta": [], "r": [], "c": []}
 
@@ -487,10 +479,10 @@ def root_map():
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
     # RUDN
-    url_rudn = "http://94.154.11.74/frost/v1.1/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
+    url_rudn = f"{RUDN_BASE_URL}/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
-        resp = requests.get(url_rudn, timeout=300)
+        resp = requests.get(url_rudn, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except Exception:
@@ -567,10 +559,10 @@ def root_map():
         ).add_to(marker_cluster)
 
     # Второй сервер
-    url_ds = "http://90.156.134.128:8080/FROST-Server/v1.1/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
+    url_ds = f"{OTHER_BASE_URL}/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("OTHER запрос: %s", url_ds)
-        resp2 = requests.get(url_ds, timeout=300)
+        resp2 = requests.get(url_ds, timeout=REQUEST_TIMEOUT)
         resp2.raise_for_status()
         data2 = resp2.json()
     except Exception:
@@ -707,7 +699,6 @@ def api_data(sensor_key):
 
         prop_data = _filter_by_cutoff(prop_data_all)
 
-        # ФОЛБЭК: если пусто в заданной глубине — последние 200 точек
         if not prop_data:
             prop_data = sorted(
                 prop_data_all,
@@ -726,7 +717,6 @@ def api_data(sensor_key):
 
         ts_list, val_list = _aggregate_by_step(prop_data, step_minutes)
 
-        # Если агрегация дала пусто (парсинг времени не удался) — вернём «сырые» точки
         if not ts_list and prop_data:
             prop_data_sorted = sorted(
                 prop_data,
@@ -756,14 +746,13 @@ def dashboard(sensor_key):
     obs_props = sensor.get("obs_props", [])
     target_props = sensor.get("target_props", [])
     title = sensor.get("title", sensor_key.replace('_',' '))
-    dm_series = sensor.get("dm_series", [])  # [(ts, deg)]
-    sm_series = sensor.get("sm_series", [])  # [(ts, mps)]
+    dm_series = sensor.get("dm_series", [])
+    sm_series = sensor.get("sm_series", [])
 
-    # Спариваем ветер
-    wind_pairs = pair_wind(dm_series, sm_series)  # [(dt_norm, deg, spd)]
+    wind_pairs = pair_wind(dm_series, sm_series)
     has_wind = bool(wind_pairs)
 
-    # Текущие карточки
+    # текущие карточки: берём последние известные значения целевых параметров (по первым попавшимся точкам)
     current = {}
     for tcfg in target_props:
         pname = tcfg["name"]
@@ -771,7 +760,6 @@ def dashboard(sensor_key):
         if v:
             current[pname] = {"value": v["value"], "unit": tcfg["unit"], "desc": tcfg["desc"], "icon": tcfg["icon"]}
 
-    # Последние направление/скорость (по паре)
     dir_str = "—"
     last_dm = None
     last_sm = None
@@ -783,123 +771,134 @@ def dashboard(sensor_key):
         idx = int(((last_dm % 360) + 11.25) // 22.5) % 16
         dir_str = f"{int(round(last_dm))}° ({dirs[idx]})"
 
-    # Данные для розы
     rose = build_wind_rose_from_pairs(wind_pairs) if has_wind else {"theta": [], "r": [], "c": []}
 
-    sensors = list(dashboard_data.keys())
+    sensors = [
+        {"key": k, "title": dashboard_data[k].get("title", k.replace('_', ' '))}
+        for k in dashboard_data.keys()
+    ]
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    html = f"""
+    template = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Дашборд - {title}</title>
+    <title>Дашборд - {{ title }}</title>
     <meta charset="utf-8">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <style>
-        body {{ background-color: #f8f9fa; color: #212529; }}
-        .navbar-dark.bg-primary {{ background-color: {DARK_GREEN} !important; }}
-        .navbar .container-fluid {{ padding-top: 6px; padding-bottom: 6px; }}
-        .navbar-brand {{ font-size: 0.95rem; cursor: pointer; }}
-        .sensor-header h2 {{ font-size: 1.1rem; margin: 0; white-space: nowrap; }}
-        .sensor-header {{ display: flex; align-items: center; gap: 10px; margin-left: auto; }}
-        .sensor-logo {{ width: 32px; height: 32px; border-radius: 8px; background: white; padding: 4px; }}
+        body { background-color: #f8f9fa; color: #212529; }
+        .navbar-dark.bg-primary { background-color: {{ DARK_GREEN }} !important; }
+        .navbar .container-fluid { padding-top: 6px; padding-bottom: 6px; }
+        .navbar-brand { font-size: 0.95rem; cursor: pointer; }
+        .sensor-header h2 { font-size: 1.1rem; margin: 0; white-space: nowrap; }
+        .sensor-header { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+        .sensor-logo { width: 32px; height: 32px; border-radius: 8px; background: white; padding: 4px; }
 
-        .metrics-container {{ display: flex; gap: 20px; margin: 16px 0 18px 0; flex-wrap: wrap; }}
-        .metric-card {{ background: white; border: none; border-radius: 12px; padding: 18px;
-                        box-shadow: 0 4px 12px rgba(0,0,0,0.05); flex: 1; min-width: 260px; }}
-        .metric-icon {{ font-size: 2rem; margin-bottom: 6px; }}
-        .metric-value {{ font-size: 2.0rem; font-weight: 700; }}
-        .metric-label {{ opacity: .8; }}
-        .temp-card {{ background: rgba(200,162,200,0.08); border-left: 4px solid {colors[0]}; }}
-        .humidity-card {{ background: rgba(135,206,235,0.08); border-left: 4px solid {colors[1]}; }}
-        .pressure-card {{ background: rgba(95,106,121,0.08); border-left: 4px solid {colors[2]}; }}
+        .metrics-container { display: flex; gap: 20px; margin: 16px 0 18px 0; flex-wrap: wrap; }
+        .metric-card { background: white; border: none; border-radius: 12px; padding: 18px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.05); flex: 1; min-width: 260px; }
+        .metric-icon { font-size: 2rem; margin-bottom: 6px; }
+        .metric-value { font-size: 2.0rem; font-weight: 700; }
+        .metric-label { opacity: .8; }
+        .temp-card { background: rgba(200,162,200,0.08); border-left: 4px solid {{ colors[0] }}; }
+        .humidity-card { background: rgba(135,206,235,0.08); border-left: 4px solid {{ colors[1] }}; }
+        .pressure-card { background: rgba(95,106,121,0.08); border-left: 4px solid {{ colors[2] }}; }
 
-        .wind-row {{ display:flex; gap:18px; align-items:stretch; margin-bottom:16px; }}
-        .wind-widget {{ flex:1; display:flex; gap:16px; align-items:center; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }}
-        .rose-card {{ flex:1; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }}
-        @media (max-width: 992px) {{ .wind-row {{ flex-direction: column; }} }}
+        .wind-row { display:flex; gap:18px; align-items:stretch; margin-bottom:16px; }
+        .wind-widget { flex:1; display:flex; gap:16px; align-items:center; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }
+        .rose-card { flex:1; background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); }
+        @media (max-width: 992px) { .wind-row { flex-direction: column; } }
 
-        .wind-face {{ width:160px; height:160px; border-radius:50%;
+        .wind-face { width:160px; height:160px; border-radius:50%;
                       background:radial-gradient(circle at 50% 50%, #fff, #f3f4f6);
-                      border:1px solid #e5e7eb; position:relative; }}
-        .wind-face .tick {{ position:absolute; width:2px; height:8px; background:#c7c7c7;
-                            left:calc(50% - 1px); top:6px; transform-origin:1px 66px; }}
-        .wind-face .label {{ position:absolute; font-weight:600; color:#5b6169; font-size:12px; }}
-        .wind-needle {{ position:absolute; left:50%; top:50%; width:0; height:0; transform-origin:0 0; }}
-        .wind-needle svg {{ transform: translate(-5px, -68px); }}
+                      border:1px solid #e5e7eb; position:relative; }
+        .wind-face .tick { position:absolute; width:2px; height:8px; background:#c7c7c7;
+                            left:calc(50% - 1px); top:6px; transform-origin:1px 66px; }
+        .wind-face .label { position:absolute; font-weight:600; color:#5b6169; font-size:12px; }
+        .wind-needle { position:absolute; left:50%; top:50%; width:0; height:0; transform-origin:0 0; }
+        .wind-needle svg { transform: translate(-5px, -68px); }
 
-        .graph-section {{ display:flex; gap:18px; align-items:stretch; }}
-        .graph-wrap {{ flex:1; }}
-        .metrics-sidebar {{ width:340px; }}
-        .sidebar-inner {{ background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); position:sticky; top:12px; }}
-        @media (max-width: 992px) {{
-            .graph-section {{ flex-direction: column; }}
-            .metrics-sidebar {{ width:auto; }}
-        }}
+        .graph-section { display:flex; gap:18px; align-items:stretch; }
+        .graph-wrap { flex:1; }
+        .metrics-sidebar { width:340px; }
+        .sidebar-inner { background:white; border-radius:12px; padding:14px; box-shadow:0 4px 12px rgba(0,0,0,.05); position:sticky; top:12px; }
+        @media (max-width: 992px) {
+            .graph-section { flex-direction: column; }
+            .metrics-sidebar { width:auto; }
+        }
 
-        .wrap-select {{ font-size: 0.92rem; line-height: 1.35; }}
-        .wrap-select option {{ font-size: 0.92rem; line-height: 1.35; white-space: normal; word-break: break-word; }}
+        .wrap-select { font-size: 0.92rem; line-height: 1.35; }
+        .wrap-select option { font-size: 0.92rem; line-height: 1.35; white-space: normal; word-break: break-word; }
 
-        .graph-card {{ background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-                       overflow: hidden; display: flex; flex-direction: column; width: 100%; min-height: 520px; }}
-        .graph-header {{ padding: 12px 16px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }}
-        .graph-title {{ font-weight: 600; margin-bottom: 0; }}
-        .graph-body {{ padding: 0; flex: 1; }}
-        #plotly-graph {{ height: 100% !important; width: 100% !important; }}
+        .graph-card { background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+                       overflow: hidden; display: flex; flex-direction: column; width: 100%; min-height: 520px; }
+        .graph-header { padding: 12px 16px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+        .graph-title { font-weight: 600; margin-bottom: 0; }
+        .graph-body { padding: 0; flex: 1; }
+        #plotly-graph { height: 100% !important; width: 100% !important; }
     </style>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/" onclick="if (history.length > 1) {{ history.back(); return false; }} else {{ return true; }}">← Назад к карте сенсоров</a>
+            <a class="navbar-brand" href="/" onclick="if (history.length > 1) { history.back(); return false; } else { return true; }">← Назад к карте сенсоров</a>
             <div class="sensor-header">
                 <div class="dropdown me-2">
                     <button class="btn btn-light btn-sm dropdown-toggle" type="button" id="sensorDropdown" data-bs-toggle="dropdown" aria-expanded="false">
                         Выбрать сенсор
                     </button>
                     <ul class="dropdown-menu" aria-labelledby="sensorDropdown">
-"""
-    for s in sensors:
-        display = dashboard_data[s].get("title", s.replace('_', ' '))
-        html += f'<li><a class="dropdown-item" href="/dashboard/{s}"><img src="{icon_url}" alt="" width="18" height="18" class="me-2">{display}</a></li>'
-
-    html += f"""
+                        {% for s in sensors %}
+                        <li><a class="dropdown-item" href="/dashboard/{{ s.key }}"><img src="{{ icon_url }}" alt="" width="18" height="18" class="me-2">{{ s.title }}</a></li>
+                        {% endfor %}
                     </ul>
                 </div>
-                <img src="{icon_url}" class="sensor-logo" alt="Sensor">
-                <h2 class="text-white mb-0">{title}</h2>
+                <img src="{{ icon_url }}" class="sensor-logo" alt="Sensor">
+                <h2 class="text-white mb-0">{{ title }}</h2>
             </div>
         </div>
     </nav>
 
     <div class="container mt-3">
         <div class="metrics-container">
-"""
-    def card(html_acc, key, cls):
-        d = current[key]
-        return html_acc + f"""
-            <div class="metric-card {cls}">
-                <div class="metric-icon"><i class="bi bi-{d['icon']}"></i></div>
-                <div class="metric-value">{round(d["value"],1)}{d["unit"]}</div>
-                <div class="metric-label">{d["desc"]}</div>
-            </div>"""
+            {% if current.Ta %}<div class="metric-card temp-card">
+                <div class="metric-icon"><i class="bi bi-thermometer-half"></i></div>
+                <div class="metric-value">{{ (current.Ta.value|round(1)) ~ current.Ta.unit }}</div>
+                <div class="metric-label">{{ current.Ta.desc }}</div>
+            </div>{% endif %}
+            {% if current.Ua %}<div class="metric-card humidity-card">
+                <div class="metric-icon"><i class="bi bi-droplet"></i></div>
+                <div class="metric-value">{{ (current.Ua.value|round(1)) ~ current.Ua.unit }}</div>
+                <div class="metric-label">{{ current.Ua.desc }}</div>
+            </div>{% endif %}
+            {% if current.Pa %}<div class="metric-card pressure-card">
+                <div class="metric-icon"><i class="bi bi-cloud"></i></div>
+                <div class="metric-value">{{ (current.Pa.value|round(1)) ~ current.Pa.unit }}</div>
+                <div class="metric-label">{{ current.Pa.desc }}</div>
+            </div>{% endif %}
 
-    if "Ta" in current:  html = card(html, "Ta", "temp-card")
-    if "Ua" in current:  html = card(html, "Ua", "humidity-card")
-    if "Pa" in current:  html = card(html, "Pa", "pressure-card")
-    if "ApparentTemperature" in current: html = card(html, "ApparentTemperature", "temp-card")
-    if "Humidity" in current:            html = card(html, "Humidity", "humidity-card")
-    if "CO2" in current:                 html = card(html, "CO2", "pressure-card")
+            {% if current.ApparentTemperature %}<div class="metric-card temp-card">
+                <div class="metric-icon"><i class="bi bi-thermometer-half"></i></div>
+                <div class="metric-value">{{ (current.ApparentTemperature.value|round(1)) ~ current.ApparentTemperature.unit }}</div>
+                <div class="metric-label">{{ current.ApparentTemperature.desc }}</div>
+            </div>{% endif %}
+            {% if current.Humidity %}<div class="metric-card humidity-card">
+                <div class="metric-icon"><i class="bi bi-droplet"></i></div>
+                <div class="metric-value">{{ (current.Humidity.value|round(1)) ~ current.Humidity.unit }}</div>
+                <div class="metric-label">{{ current.Humidity.desc }}</div>
+            </div>{% endif %}
+            {% if current.CO2 %}<div class="metric-card pressure-card">
+                <div class="metric-icon"><i class="bi bi-cloud-haze2"></i></div>
+                <div class="metric-value">{{ (current.CO2.value|round(1)) ~ current.CO2.unit }}</div>
+                <div class="metric-label">{{ current.CO2.desc }}</div>
+            </div>{% endif %}
+        </div>
 
-    html += "\n        </div>\n"
-
-    # ----- Блок ветра (если есть пары) -----
-    if has_wind:
-        html += f"""
+        {% if has_wind %}
         <div class="wind-row">
             <div class="wind-widget">
                 <div class="wind-face" id="wind-face">
@@ -908,8 +907,8 @@ def dashboard(sensor_key):
                 <div class="wind-info">
                     <h5>Компас ветра</h5>
                     <div class="text-muted"> </div>
-                    <div style="font-size:1.6rem; font-weight:700; margin-top:6px;">{(f"{last_sm:.1f} м/с" if last_sm is not None else "—")}</div>
-                    <div style='margin-top:6px;'>Направление: {dir_str}</div>
+                    <div style="font-size:1.6rem; font-weight:700; margin-top:6px;">{{ (last_sm|default(None)) and (last_sm|round(1)) ~ " м/с" or "—" }}</div>
+                    <div style="margin-top:6px;">Направление: {{ dir_str }}</div>
                 </div>
             </div>
 
@@ -918,9 +917,8 @@ def dashboard(sensor_key):
                 <div id="wind-rose" style="height:240px;"></div>
             </div>
         </div>
-        """
+        {% endif %}
 
-    html += f"""
         <div class="graph-section">
             <div class="graph-wrap">
                 <div class="graph-card">
@@ -951,12 +949,9 @@ def dashboard(sensor_key):
                 <div class="sidebar-inner">
                     <label for="metrics-select" class="form-label">Выберите параметры для отображения:</label>
                     <select class="form-select wrap-select" id="metrics-select" multiple size="12">
-"""
-    for idx, p in enumerate(obs_props):
-        sel = ' selected' if idx == 0 else ''
-        html += f'<option value="{p["name"]}" title="{p["desc"]}"{sel}>{p["desc"]}</option>'
-
-    html += f"""
+                        {% for p in obs_props %}
+                        <option value="{{ p.name }}" title="{{ p.desc }}" {% if loop.first %}selected{% endif %}>{{ p.desc }}</option>
+                        {% endfor %}
                     </select>
                 </div>
             </aside>
@@ -964,32 +959,31 @@ def dashboard(sensor_key):
     </div>
 
     <script>
-        // Компас — рисуем если есть значения
-        (function(){{
+        (function(){
             const face = document.getElementById('wind-face');
             if (!face) return;
-            for (let a=0; a<360; a+=30){{
+            for (let a=0; a<360; a+=30){
                 const t = document.createElement('div');
                 t.className='tick';
                 t.style.transform = "rotate(" + a + "deg)";
                 face.appendChild(t);
-            }}
+            }
             const labels = [
                 ['N','50%','6px','translate(-50%,0)'],
                 ['E','calc(100% - 16px)','50%','translate(0,-50%)'],
                 ['S','50%','calc(100% - 16px)','translate(-50%,0)'],
                 ['W','6px','50%','translate(0,-50%)'],
             ];
-            labels.forEach(([txt,left,top,tr])=>{{
+            labels.forEach(([txt,left,top,tr])=>{
                 const l=document.createElement('div');
                 l.className='label'; l.innerText=txt;
                 l.style.left=left; l.style.top=top; l.style.transform=tr; face.appendChild(l);
-            }});
+            });
             const needle = document.getElementById('wind-needle');
-            const deg = {('null' if last_dm is None else f"{last_dm:.1f}")};
-            const spd = {('null' if last_sm is None else f"{last_sm:.1f}")};
-            if (deg !== null){{
-                const color = spd===null ? '{PALE_BLUE}' : (spd < 3 ? '{PALE_BLUE}' : (spd < 8 ? '{SLATE}' : '{DARK_GREEN}'));
+            const deg = {{ last_dm if last_dm is not none else 'null' }};
+            const spd = {{ last_sm if last_sm is not none else 'null' }};
+            if (deg !== null){
+                const color = spd===null ? '{{ PALE_BLUE }}' : (spd < 3 ? '{{ PALE_BLUE }}' : (spd < 8 ? '{{ SLATE }}' : '{{ DARK_GREEN }}'));
                 needle.innerHTML =
                     '<svg width="10" height="140" viewBox="0 0 10 140">' +
                     '<polygon points="5,5 9,68 5,74 1,68" fill="'+color+'" />' +
@@ -997,20 +991,19 @@ def dashboard(sensor_key):
                     '<circle cx="5" cy="74" r="4" fill="#333"></circle>' +
                     '</svg>';
                 needle.style.transform = "rotate(" + deg + "deg)";
-            }}
-        }})();
+            }
+        })();
 
-        // Графики
-        function ensureSelection() {{
+        function ensureSelection() {
           const selEl = document.getElementById('metrics-select');
           if (!selEl) return false;
           const selected = Array.from(selEl.selectedOptions || []);
           if (selected.length > 0) return false;
-          if (selEl.options.length > 0) {{ selEl.options[0].selected = true; return true; }}
+          if (selEl.options.length > 0) { selEl.options[0].selected = true; return true; }
           return false;
-        }}
+        }
 
-        function updateGraph(){{
+        function updateGraph(){
             const changedByEnsure = ensureSelection();
 
             const selEl = document.getElementById('metrics-select');
@@ -1019,10 +1012,10 @@ def dashboard(sensor_key):
 
             el.innerHTML = '<div class="m-3 text-muted">Загрузка…</div>';
 
-            if (!sel.length) {{
+            if (!sel.length) {
                 el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>';
                 return;
-            }}
+            }
             const r = document.getElementById('range-select')?.value || '7d';
             const a = document.getElementById('agg-select')?.value || '1h';
 
@@ -1031,108 +1024,130 @@ def dashboard(sensor_key):
             params.append('range', r);
             params.append('agg', a);
 
-            fetch('/api/data/{sensor_key}?'+params.toString())
+            fetch('/api/data/{{ sensor_key }}?'+params.toString())
             .then(r => r.json())
-            .then(resp => {{
-                if (!resp || !resp.length) {{
-                    if (!changedByEnsure) {{
+            .then(resp => {
+                if (!resp || !resp.length) {
+                    if (!changedByEnsure) {
                         const changed = ensureSelection();
                         if (changed) return updateGraph();
-                    }}
+                    }
                     el.innerHTML = '<div class="alert alert-warning m-3">Нет данных для отображения</div>';
                     return;
-                }}
+                }
                 el.innerHTML = '';
 
-                const traces = resp.map(m => ({{
+                const traces = resp.map(m => ({
                     x: m.timestamps.map(ts => new Date(ts)),
                     y: m.values,
                     name: m.desc + (m.unit ? ' ('+m.unit+')' : ''),
                     type: 'scatter', mode: 'lines',
-                    line: {{ color: m.color, width: 1.5 }}
-                }}));
+                    line: { color: m.color, width: 1.5 }
+                }));
 
                 const allVals = resp.flatMap(m => m.values).filter(v => Number.isFinite(v));
                 const minY = allVals.length ? Math.min(...allVals) : null;
                 const maxY = allVals.length ? Math.max(...allVals) : null;
                 const pad = (minY!==null && maxY!==null) ? (maxY - minY) * 0.1 : 0;
 
-                Plotly.newPlot('plotly-graph', traces, {{
-                    margin: {{ t: 25, r: 250, b: 100, l: 60 }},
-                    font: {{ family: 'Inter', size: 12 }},
+                Plotly.newPlot('plotly-graph', traces, {
+                    margin: { t: 25, r: 250, b: 100, l: 60 },
+                    font: { family: 'Inter', size: 12 },
                     showlegend: true,
-                    legend: {{ x: 1.02, xanchor: 'left', y: 1, bgcolor: 'rgba(255,255,255,0.8)', bordercolor: '#ddd', borderwidth: 1 }},
+                    legend: { x: 1.02, xanchor: 'left', y: 1, bgcolor: 'rgba(255,255,255,0.8)', bordercolor: '#ddd', borderwidth: 1 },
                     plot_bgcolor: '#ffffff', paper_bgcolor: '#ffffff',
-                    xaxis: {{
+                    xaxis: {
                         type: 'date', tickangle: -30, showgrid: true, gridcolor: '#f0f0f0', zeroline: false,
-                        rangeslider: {{ visible: true, bgcolor: '#d3d3d3', bordercolor: '#888', borderwidth: 1, thickness: 0.1 }},
-                        rangeselector: {{
+                        rangeslider: { visible: true, bgcolor: '#d3d3d3', bordercolor: '#888', borderwidth: 1, thickness: 0.1 },
+                        rangeselector: {
                             buttons: [
-                                {{ count: 1, label: '1д', step: 'day', stepmode: 'backward' }},
-                                {{ count: 7, label: '7д', step: 'day', stepmode: 'backward' }},
-                                {{ count: 1, label: '1м', step: 'month', stepmode: 'backward' }},
-                                {{ count: 6, label: '6м', step: 'month', stepmode: 'backward' }},
-                                {{ count: 1, label: '1г', step: 'year', stepmode: 'backward' }},
-                                {{ step: 'all', label: 'Всё' }}
+                                { count: 1, label: '1д', step: 'day', stepmode: 'backward' },
+                                { count: 7, label: '7д', step: 'day', stepmode: 'backward' },
+                                { count: 1, label: '1м', step: 'month', stepmode: 'backward' },
+                                { count: 6, label: '6м', step: 'month', stepmode: 'backward' },
+                                { count: 1, label: '1г', step: 'year', stepmode: 'backward' },
+                                { step: 'all', label: 'Всё' }
                             ]
-                        }}
-                    }},
-                    yaxis: {{
+                        }
+                    },
+                    yaxis: {
                         automargin: true,
                         range: [
                             (Number.isFinite(minY - pad)?(minY-pad):null),
                             (Number.isFinite(maxY + pad)?(maxY+pad):null)
                         ]
-                    }}
-                }}, {{responsive:true}});
-            }})
-            .catch(() => {{
+                    }
+                }, {responsive:true});
+            })
+            .catch(() => {
                 el.innerHTML = '<div class="alert alert-danger m-3">Ошибка загрузки данных</div>';
-            }});
-        }}
+            });
+        }
         document.getElementById('metrics-select')?.addEventListener('change', updateGraph);
         document.getElementById('range-select')?.addEventListener('change', updateGraph);
         document.getElementById('agg-select')?.addEventListener('change', updateGraph);
-        window.onload = function(){{ updateGraph(); }};
+        window.onload = function(){ updateGraph(); };
 
-        // Роза ветров
-        (function(){{
+        (function(){
             var el = document.getElementById('wind-rose');
             if (!el) return;
-            var theta = {json.dumps(rose["theta"])};
-            var r = {json.dumps(rose["r"])};
-            var c = {json.dumps(rose["c"])};
-            if (!theta.length) {{
+            var theta = {{ rose_theta | tojson }};
+            var r = {{ rose_r | tojson }};
+            var c = {{ rose_c | tojson }};
+            if (!theta.length) {
                 el.innerHTML = '<div class="alert alert-warning m-3">Недостаточно данных для розы ветров</div>';
                 return;
-            }}
-            var trace = {{
+            }
+            var trace = {
                 type: 'barpolar',
                 theta: theta,
                 r: r,
-                marker: {{ color: '{DARK_GREEN}', opacity: 0.85, line: {{ color: '{PALE_BLUE}', width: 1 }} }},
-                hovertemplate: 'Сектор %{{theta}}°<br>Частота: %{{r}}<br>Средняя скорость: %{{customdata}} м/с<extra></extra>',
+                marker: { color: '{{ DARK_GREEN }}', opacity: 0.85, line: { color: '{{ PALE_BLUE }}', width: 1 } },
+                hovertemplate: 'Сектор %{theta}°<br>Частота: %{r}<br>Средняя скорость: %{customdata} м/с<extra></extra>',
                 customdata: c
-            }};
-            var layout = {{
-                polar: {{
-                    angularaxis: {{ direction: 'clockwise', thetaunit: 'degrees', tick0: 0, dtick: 45, gridcolor: '#e9ecef', linecolor: '#adb5bd' }},
-                    radialaxis: {{ gridcolor: '#e9ecef', linecolor: '#adb5bd' }},
+            };
+            var layout = {
+                polar: {
+                    angularaxis: { direction: 'clockwise', thetaunit: 'degrees', tick0: 0, dtick: 45, gridcolor: '#e9ecef', linecolor: '#adb5bd' },
+                    radialaxis: { gridcolor: '#e9ecef', linecolor: '#adb5bd' },
                     bgcolor: '#ffffff'
-                }},
-                margin: {{ t: 10, r: 10, b: 10, l: 10 }},
+                },
+                margin: { t: 10, r: 10, b: 10, l: 10 },
                 showlegend: false,
                 paper_bgcolor: '#ffffff',
-                font: {{ family: 'Inter' }}
-            }};
-            Plotly.newPlot('wind-rose', [trace], layout, {{responsive:true}});
-        }})();
+                font: { family: 'Inter' }
+            };
+            Plotly.newPlot('wind-rose', [trace], layout, {responsive:true});
+        })();
     </script>
 </body>
 </html>
 """
-    return html
+    return render_template_string(
+        template,
+        title=title,
+        sensors=sensors,
+        icon_url=icon_url,
+        current=current,
+        has_wind=has_wind,
+        last_dm=last_dm,
+        last_sm=last_sm,
+        dir_str=dir_str,
+        rose_theta=rose["theta"],
+        rose_r=rose["r"],
+        rose_c=rose["c"],
+        obs_props=obs_props,
+        sensor_key=sensor_key,
+        DARK_GREEN=DARK_GREEN,
+        PALE_BLUE=PALE_BLUE,
+        SLATE=SLATE,
+        colors=colors
+    )
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", debug=False, port=port)
