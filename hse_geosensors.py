@@ -1,3 +1,12 @@
+"""Веб-приложение для визуализации данных геосенсоров на карте и в дашборде.
+
+Модуль содержит конфигурацию среды, вспомогательные утилиты обработки данных
+SensorThings, Flask-приложение с картой и дашбордом, а также API-эндпоинты для
+агрегации временных рядов. Большая часть логики сосредоточена вокруг
+подготовки данных из двух серверов SensorThings и их дальнейшего отображения в
+веб-интерфейсе.
+"""
+
 import os
 import json
 import logging
@@ -13,6 +22,8 @@ from shapely.geometry import shape, Point
 from shapely.ops import transform as shp_transform
 import pyproj
 
+"""Настройки логирования и глобальные объекты приложения."""
+
 # ---------------- ЛОГИ ----------------
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("vis")
@@ -22,11 +33,13 @@ app = Flask(__name__)
 app.config["CACHE_TYPE"] = "null"
 
 # ---------------- ENV ----------------
+"""Переменные окружения и таймауты сетевых запросов."""
 RUDN_BASE_URL  = os.getenv("RUDN_BASE_URL",  "http://94.154.11.74/frost/v1.1")
 OTHER_BASE_URL = os.getenv("OTHER_BASE_URL", "http://90.156.134.128:8080/FROST-Server/v1.1")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 
 # ---------------- ПАЛИТРА ----------------
+"""Цветовые настройки для визуальных компонентов интерфейса."""
 colors = [
     '#C8A2C8', '#87CEEB', '#5F6A79', '#2F4F4F', '#A0522D', '#4682B4',
     '#556B2F', '#DDA0DD', '#B0C4DE', '#20B2AA', '#A52A2A', '#808080', '#008080'
@@ -36,6 +49,7 @@ PALE_BLUE  = '#87CEEB'
 SLATE      = '#5F6A79'
 
 # ---------------- MULTIDATASTREAM (RUDN) ----------------
+"""Метаданные и целевые показатели для multidatastream сервера РУДН."""
 OBS_PROPS = [
     {"name": "Dn", "desc": "Минимальное направление ветра", "unit": "°"},
     {"name": "Dm", "desc": "Среднее направление ветра", "unit": "°"},
@@ -56,6 +70,7 @@ TARGET_PROPS_RUDN = {
 }
 
 # ---------------- DATASTREAM (наш сервер) ----------------
+"""Описания целевых датастримов второго сервера SensorThings."""
 TARGET_DS_LIST = [
     "Ощущаемая температура воздуха",
     "Влажность воздуха",
@@ -68,16 +83,39 @@ TARGET_PROPS_DS = {
 }
 
 # ---------------- ХРАНИЛИЩЕ ДЛЯ ДАШБОРДОВ ----------------
+"""Кэш подготовленных временных рядов для страниц дашборда."""
 dashboard_data = {}
 
 # ---------------- УТИЛИТЫ ----------------
 def make_safe_key(s: str) -> str:
+    """Возвращает строку, пригодную в качестве ключа или идентификатора.
+
+    Приводит названия локаций и сенсоров к безопасному формату, заменяя
+    пробелы и разделители на подчёркивания. Это позволяет использовать ключи в
+    идентификаторах HTML-элементов и в названиях файлов без риска конфликтов.
+    """
+
     return (s or "Unknown").replace(" ", "_").replace(",", "_").replace("/", "_")
 
 def is_epsg3857(x: float, y: float) -> bool:
+    """Определяет, похожи ли координаты на проекцию EPSG:3857.
+
+    SensorThings иногда возвращает координаты в веб-проекции. Эвристика
+    позволяет отличить такие значения (в градусах они выходят за пределы
+    [-180, 180] или [-90, 90]) и выполнить последующее преобразование в WGS84.
+    """
+
     return abs(x) > 180 or abs(y) > 90
 
 def parse_location_coords(loc_obj):
+    """Извлекает координаты точки из объекта локации SensorThings.
+
+    Поддерживаются различные варианты структур: чистый GeoJSON, объект Feature
+    или словари с полями ``latitude``/``longitude``. Если точка задана в
+    проекции EPSG:3857, она преобразуется в WGS84. Возвращает кортеж
+    ``(lat, lon)`` или ``None`` при невозможности распознать координаты.
+    """
+
     if not loc_obj:
         return None
     geo = None
@@ -117,6 +155,15 @@ def parse_location_coords(loc_obj):
     return None
 
 def _coerce_float_result(res):
+    """Приводит значение наблюдения к числу с плавающей точкой.
+
+    SensorThings API возвращает результаты наблюдений в разных форматах:
+    простые числа, строки с запятыми, вложенные словари или массивы. Функция
+    рекурсивно проходит по возможным полям ``value``/``result`` и приводит
+    найденное значение к ``float``. Если корректное число не найдено,
+    возвращается ``None``.
+    """
+
     if res is None:
         return None
     if isinstance(res, (int, float)):
@@ -147,6 +194,13 @@ def _coerce_float_result(res):
     return None
 
 def _parse_iso_phen_time(ts: str):
+    """Преобразует строковое время наблюдения к объекту ``datetime``.
+
+    Учтены особенности формата SensorThings: интервалы ``start/end`` через
+    ``/`` и суффикс ``Z``. При ошибках возвращается ``None``, чтобы вызывающий
+    код мог пропустить некорректные временные метки.
+    """
+
     if not ts:
         return None
     s = ts.strip()
@@ -167,6 +221,13 @@ def _parse_iso_phen_time(ts: str):
             return None
 
 def _norm_key_10min(ts: str):
+    """Нормализует метку времени к ближайшему интервалу в 10 минут.
+
+    Используется для объединения измерений скорости и направления ветра.
+    Возвращает нормализованную строку ISO и объект ``datetime`` для последующей
+    сортировки по реальному времени наблюдения.
+    """
+
     dt = _parse_iso_phen_time(ts)
     if dt is None:
         return None, None
@@ -177,12 +238,26 @@ def _norm_key_10min(ts: str):
     return ndt.isoformat(), ndt
 
 def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
+    """Округляет дату вниз до указанного шага в минутах.
+
+    Для агрегации временных рядов необходимо привести метки времени к общему
+    шагу. Функция опирается на timestamp в секундах и возвращает ``datetime`` в
+    исходном часовом поясе (или UTC по умолчанию).
+    """
+
     sec = step_minutes * 60
     t = dt.timestamp()
     floored = int(t // sec) * sec
     return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
 
 def _aggregate_by_step(prop_data, step_minutes: int):
+    """Агрегирует значения наблюдений по указанному шагу времени.
+
+    Строит временные корзины с шагом ``step_minutes`` и вычисляет среднее
+    значение по каждой из них. Возвращает две отсортированные последовательности
+    одинаковой длины: ISO-метки времени и усреднённые значения.
+    """
+
     sums = {}
     counts = {}
     for d in prop_data:
@@ -202,6 +277,13 @@ def _aggregate_by_step(prop_data, step_minutes: int):
     return keys_sorted, vals
 
 def _parse_range_cutoff(range_str: str):
+    """Определяет нижнюю границу периода по строковому описанию диапазона.
+
+    Поддерживаются суффиксы ``d``/``д`` (дни), ``h``/``ч`` (часы) и ``m``/``м``
+    (условные месяцы по 30 дней). Значение ``all`` отключает фильтрацию. При
+    ошибке возвращается ``None`` и фильтрация не применяется.
+    """
+
     if not range_str or range_str.lower() in ("all", "всё", "все"):
         return None
     now = datetime.now(timezone.utc)
@@ -222,6 +304,14 @@ def _parse_range_cutoff(range_str: str):
 
 # ---------- RUDN helpers ----------
 def get_latest_triplet_from_md(md) -> dict:
+    """Возвращает последние значения ключевых параметров из multidatastream.
+
+    Функция читает первую (самую свежую) запись массива ``Observations`` и
+    извлекает измерения температуры, влажности и давления по индексам
+    multidatastream. Возвращается словарь ``{код: (значение, единица)}``, где
+    значения приведены к ``float``.
+    """
+
     obs_list = md.get("Observations") or []
     if not obs_list:
         return {}
@@ -238,6 +328,14 @@ def get_latest_triplet_from_md(md) -> dict:
     return out
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
+    """Сохраняет временные ряды по multidatastream в глобальное хранилище.
+
+    Проходит по всем наблюдениям multidatastream и формирует список значений
+    для каждой наблюдаемой величины. Дополнительно извлекает временные ряды
+    направления (Dm) и скорости (Sm) ветра. Результат сохраняется в глобальный
+    ``dashboard_data`` под ключом ``MD__<локация>__<id>``.
+    """
+
     md_id = str(md.get('@iot.id'))
     obs_list = md.get("Observations") or []
     if not obs_list or md_id is None:
@@ -313,6 +411,13 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
 
 # ---------- наш сервер helpers ----------
 def get_latest_observation_value_unit(datastream):
+    """Возвращает последнее значение и единицу измерения датастрима.
+
+    Считывает первую запись ``Observations`` (предполагается, что API выдаёт их
+    в порядке убывания времени) и преобразует результат в число. Возвращает пару
+    ``(значение, единица)``. Если данных нет, выдаёт ``(None, "")``.
+    """
+
     obs = datastream.get('Observations') or []
     if not obs:
         return None, ""
@@ -322,6 +427,14 @@ def get_latest_observation_value_unit(datastream):
     return (float(v) if v is not None else None), unit
 
 def collect_timeseries_from_thing(location_name: str, thing) -> None:
+    """Извлекает наблюдения для Thing и сохраняет их для дашборда.
+
+    Перебирает все datastreams внутри объекта ``Thing``, фильтрует целевые
+    показатели и собирает временные ряды в общую структуру ``dashboard_data``.
+    Функция также формирует метаданные о доступных показателях (цвет, иконка,
+    единица измерения) для дальнейшего отображения на дашборде.
+    """
+
     thing_name = thing.get('name', f"Thing-{thing.get('@iot.id')}")
     datastreams = thing.get('Datastreams') or []
     if not datastreams:
@@ -371,6 +484,13 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
 
 # ---------------- Спаривание ветра (Dm + Sm) ----------------
 def pair_wind(dm_list, sm_list):
+    """Объединяет серии направления и скорости ветра по 10-минутным интервалам.
+
+    Использует нормализацию времени на шаг 10 минут и оставляет последнее
+    значение в интервале. Возвращает список кортежей ``(dt, deg, spd)``,
+    отсортированных по убыванию времени, для построения розы ветров.
+    """
+
     dir_by_key = {}
     spd_by_key = {}
     key_dt_map = {}
@@ -400,12 +520,21 @@ def pair_wind(dm_list, sm_list):
     return pairs
 
 def build_wind_rose_from_pairs(pairs):
+    """Строит данные для розы ветров на основе совмещённых измерений.
+
+    Делит окружность на 16 секторов по 22.5° и вычисляет частоту попаданий и
+    среднюю скорость ветра для каждого сектора. Возвращает словарь с ключами
+    ``theta`` (центральные углы), ``r`` (частоты) и ``c`` (средняя скорость).
+    """
+
     if not pairs:
         return {"theta": [], "r": [], "c": []}
 
     step = 22.5
     bins = [i * step for i in range(16)]
     def sector_center(deg):
+        """Возвращает центральный угол для сектора розы ветров."""
+
         d = deg % 360.0
         idx = int((d + step/2) // step) % 16
         return bins[idx] + step/2
@@ -425,6 +554,14 @@ def build_wind_rose_from_pairs(pairs):
 # ---------------- Корневая карта: оба сервера ----------------
 @app.route("/")
 def root_map():
+    """Отображает карту Москвы с сенсорами из двух серверов SensorThings.
+
+    Выполняет два HTTP-запроса: к серверу РУДН и к дополнительному серверу, и
+    для каждой локации строит всплывающий попап с оперативными значениями и
+    ссылкой на дашборд. Функция также собирает данные для ``dashboard_data``,
+    чтобы последующие переходы на дашборды не требовали повторных запросов.
+    """
+
     m = folium.Map(location=(55.7558, 37.6175), zoom_start=12, tiles='CartoDB positron')
 
     m.get_root().header.add_child(folium.Element("""
@@ -653,6 +790,14 @@ def root_map():
 # ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
+    """Возвращает агрегированные временные ряды для выбранных метрик датчика.
+
+    Принимает список идентификаторов метрик (через параметр ``metrics``),
+    диапазон дат и желаемый шаг агрегации. На основе ранее собранных данных из
+    ``dashboard_data`` фильтрует и усредняет ряды, формируя ответ для клиента
+    дашборда. В случае отсутствия данных возвращает пустой список.
+    """
+
     if sensor_key not in dashboard_data:
         return json.dumps([])
 
@@ -678,6 +823,8 @@ def api_data(sensor_key):
     agg_map = {"1h": 60, "3h": 180, "1d": 1440}
 
     def _filter_by_cutoff(rows):
+        """Отфильтровывает записи по нижней границе диапазона."""
+
         if cutoff_dt is None:
             return rows
         out = []
@@ -738,6 +885,14 @@ def api_data(sensor_key):
 # ---------------- Дашборд ----------------
 @app.route("/dashboard/<sensor_key>")
 def dashboard(sensor_key):
+    """Строит страницу дашборда по сенсору с графиками и показателями.
+
+    Использует заранее подготовленные временные ряды, выводит текущие значения
+    целевых показателей, компас ветра и розу ветров. Основной график строится с
+    помощью Plotly и обновляется через ``/api/data`` при смене настроек
+    диапазона или выбранных метрик. Возвращает HTML-шаблон, готовый к рендеру.
+    """
+
     if sensor_key not in dashboard_data:
         return f"<h3>Нет данных для {sensor_key}</h3>", 404
 
@@ -1146,6 +1301,13 @@ def dashboard(sensor_key):
 
 @app.get("/healthz")
 def healthz():
+    """Простейшая проверка доступности сервиса.
+
+    Эндпоинт используется системой мониторинга или оркестратором контейнеров для
+    проверки, что процесс Flask жив. Возвращает небольшой JSON без дополнительных
+    зависимостей.
+    """
+
     return {"ok": True}
 
 if __name__ == "__main__":
