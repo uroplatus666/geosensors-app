@@ -1,3 +1,5 @@
+"""Веб-приложение для визуализации данных геосенсоров на карте и в дашборде."""
+
 import os
 import json
 import logging
@@ -72,12 +74,18 @@ dashboard_data = {}
 
 # ---------------- УТИЛИТЫ ----------------
 def make_safe_key(s: str) -> str:
+    """Возвращает строку, пригодную в качестве ключа или идентификатора."""
+
     return (s or "Unknown").replace(" ", "_").replace(",", "_").replace("/", "_")
 
 def is_epsg3857(x: float, y: float) -> bool:
+    """Определяет, похожи ли координаты на проекцию EPSG:3857."""
+
     return abs(x) > 180 or abs(y) > 90
 
 def parse_location_coords(loc_obj):
+    """Извлекает координаты точки из объекта локации SensorThings."""
+
     if not loc_obj:
         return None
     geo = None
@@ -117,6 +125,8 @@ def parse_location_coords(loc_obj):
     return None
 
 def _coerce_float_result(res):
+    """Приводит значение наблюдения к числу с плавающей точкой."""
+
     if res is None:
         return None
     if isinstance(res, (int, float)):
@@ -147,6 +157,8 @@ def _coerce_float_result(res):
     return None
 
 def _parse_iso_phen_time(ts: str):
+    """Преобразует строковое время наблюдения к объекту ``datetime``."""
+
     if not ts:
         return None
     s = ts.strip()
@@ -167,6 +179,8 @@ def _parse_iso_phen_time(ts: str):
             return None
 
 def _norm_key_10min(ts: str):
+    """Нормализует метку времени к ближайшему интервалу в 10 минут."""
+
     dt = _parse_iso_phen_time(ts)
     if dt is None:
         return None, None
@@ -177,12 +191,16 @@ def _norm_key_10min(ts: str):
     return ndt.isoformat(), ndt
 
 def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
+    """Округляет дату вниз до указанного шага в минутах."""
+
     sec = step_minutes * 60
     t = dt.timestamp()
     floored = int(t // sec) * sec
     return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
 
 def _aggregate_by_step(prop_data, step_minutes: int):
+    """Агрегирует значения наблюдений по указанному шагу времени."""
+
     sums = {}
     counts = {}
     for d in prop_data:
@@ -202,6 +220,8 @@ def _aggregate_by_step(prop_data, step_minutes: int):
     return keys_sorted, vals
 
 def _parse_range_cutoff(range_str: str):
+    """Определяет нижнюю границу периода по строковому описанию диапазона."""
+
     if not range_str or range_str.lower() in ("all", "всё", "все"):
         return None
     now = datetime.now(timezone.utc)
@@ -222,6 +242,8 @@ def _parse_range_cutoff(range_str: str):
 
 # ---------- RUDN helpers ----------
 def get_latest_triplet_from_md(md) -> dict:
+    """Возвращает последние значения ключевых параметров из multidatastream."""
+
     obs_list = md.get("Observations") or []
     if not obs_list:
         return {}
@@ -238,6 +260,8 @@ def get_latest_triplet_from_md(md) -> dict:
     return out
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
+    """Сохраняет временные ряды по multidatastream в глобальное хранилище."""
+
     md_id = str(md.get('@iot.id'))
     obs_list = md.get("Observations") or []
     if not obs_list or md_id is None:
@@ -313,6 +337,8 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
 
 # ---------- наш сервер helpers ----------
 def get_latest_observation_value_unit(datastream):
+    """Возвращает последнее значение и единицу измерения датастрима."""
+
     obs = datastream.get('Observations') or []
     if not obs:
         return None, ""
@@ -322,6 +348,8 @@ def get_latest_observation_value_unit(datastream):
     return (float(v) if v is not None else None), unit
 
 def collect_timeseries_from_thing(location_name: str, thing) -> None:
+    """Извлекает наблюдения для Thing и сохраняет их для дашборда."""
+
     thing_name = thing.get('name', f"Thing-{thing.get('@iot.id')}")
     datastreams = thing.get('Datastreams') or []
     if not datastreams:
@@ -371,6 +399,8 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
 
 # ---------------- Спаривание ветра (Dm + Sm) ----------------
 def pair_wind(dm_list, sm_list):
+    """Объединяет серии направления и скорости ветра по 10-минутным интервалам."""
+
     dir_by_key = {}
     spd_by_key = {}
     key_dt_map = {}
@@ -400,12 +430,16 @@ def pair_wind(dm_list, sm_list):
     return pairs
 
 def build_wind_rose_from_pairs(pairs):
+    """Строит данные для розы ветров на основе совмещённых измерений."""
+
     if not pairs:
         return {"theta": [], "r": [], "c": []}
 
     step = 22.5
     bins = [i * step for i in range(16)]
     def sector_center(deg):
+        """Возвращает центральный угол для сектора розы ветров."""
+
         d = deg % 360.0
         idx = int((d + step/2) // step) % 16
         return bins[idx] + step/2
@@ -425,6 +459,8 @@ def build_wind_rose_from_pairs(pairs):
 # ---------------- Корневая карта: оба сервера ----------------
 @app.route("/")
 def root_map():
+    """Отображает карту Москвы с сенсорами из двух серверов SensorThings."""
+
     m = folium.Map(location=(55.7558, 37.6175), zoom_start=12, tiles='CartoDB positron')
 
     m.get_root().header.add_child(folium.Element("""
@@ -653,6 +689,8 @@ def root_map():
 # ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
+    """Возвращает агрегированные временные ряды для выбранных метрик датчика."""
+
     if sensor_key not in dashboard_data:
         return json.dumps([])
 
@@ -678,6 +716,8 @@ def api_data(sensor_key):
     agg_map = {"1h": 60, "3h": 180, "1d": 1440}
 
     def _filter_by_cutoff(rows):
+        """Отфильтровывает записи по нижней границе диапазона."""
+
         if cutoff_dt is None:
             return rows
         out = []
@@ -738,6 +778,8 @@ def api_data(sensor_key):
 # ---------------- Дашборд ----------------
 @app.route("/dashboard/<sensor_key>")
 def dashboard(sensor_key):
+    """Строит страницу дашборда по сенсору с графиками и показателями."""
+
     if sensor_key not in dashboard_data:
         return f"<h3>Нет данных для {sensor_key}</h3>", 404
 
@@ -1146,6 +1188,8 @@ def dashboard(sensor_key):
 
 @app.get("/healthz")
 def healthz():
+    """Простейшая проверка доступности сервиса."""
+
     return {"ok": True}
 
 if __name__ == "__main__":
