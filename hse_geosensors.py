@@ -1,3 +1,4 @@
+
 """Веб-приложение для визуализации данных геосенсоров.
 
 Модуль объединяет:
@@ -30,22 +31,17 @@ from shapely.ops import transform as shp_transform
 import pyproj
 
 """Настройки логирования и глобальные объекты приложения."""
-
-# ---------------- ЛОГИ ----------------
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("vis")
 
-# ---------------- FLASK ----------------
 app = Flask(__name__)
 app.config["CACHE_TYPE"] = "null"
 
-# ---------------- ENV ----------------
 """Переменные окружения и таймауты сетевых запросов."""
 RUDN_BASE_URL  = os.getenv("RUDN_BASE_URL",  "http://94.154.11.74/frost/v1.1")
 OTHER_BASE_URL = os.getenv("OTHER_BASE_URL", "http://90.156.134.128:8080/FROST-Server/v1.1")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 
-# ---------------- ПАЛИТРА ----------------
 """Цветовые настройки для визуальных компонентов интерфейса."""
 colors = [
     '#C8A2C8', '#87CEEB', '#5F6A79', '#2F4F4F', '#A0522D', '#4682B4',
@@ -55,7 +51,6 @@ DARK_GREEN = '#2F4F4F'
 PALE_BLUE  = '#87CEEB'
 SLATE      = '#5F6A79'
 
-# ---------------- MULTIDATASTREAM (RUDN) ----------------
 """Метаданные и целевые показатели для multidatastream сервера РУДН."""
 OBS_PROPS = [
     {"name": "Dn", "desc": "Минимальное направление ветра", "unit": "°"},
@@ -76,7 +71,6 @@ TARGET_PROPS_RUDN = {
     "Pa": {"desc": "Атмосферное давление","color": colors[2], "unit": "hPa","icon": "cloud"},
 }
 
-# ---------------- DATASTREAM (наш сервер) ----------------
 """Описания целевых датастримов второго сервера SensorThings."""
 TARGET_DS_LIST = [
     "Ощущаемая температура воздуха",
@@ -89,11 +83,9 @@ TARGET_PROPS_DS = {
     "Концентрация CO2":               {"name": "CO2",                 "desc": "Концентрация CO2",              "color": colors[2], "unit": "ppm", "icon": "cloud-haze2"},
 }
 
-# ---------------- ХРАНИЛИЩЕ ДЛЯ ДАШБОРДОВ ----------------
 """Кэш подготовленных временных рядов для страниц дашборда."""
 dashboard_data = {}
 
-# ---------------- УТИЛИТЫ ----------------
 def make_safe_key(s: str) -> str:
     """Возвращает безопасный идентификатор для использования в ключах и DOM.
 
@@ -185,6 +177,7 @@ def parse_location_coords(loc_obj):
     return None
 
 def _coerce_float_result(res):
+
     """Преобразует результат наблюдения к ``float`` независимо от формата.
 
     Args:
@@ -228,6 +221,7 @@ def _coerce_float_result(res):
     return None
 
 def _parse_iso_phen_time(ts: str):
+
     """Преобразует время наблюдения SensorThings в ``datetime``.
 
     Args:
@@ -240,7 +234,6 @@ def _parse_iso_phen_time(ts: str):
         точку диапазона, чтобы дальнейшие вычисления работали с конкретным
         моментом времени.
     """
-
     if not ts:
         return None
     s = ts.strip()
@@ -261,6 +254,7 @@ def _parse_iso_phen_time(ts: str):
             return None
 
 def _norm_key_10min(ts: str):
+  
     """Нормализует временную метку к 10-минутному интервалу.
 
     Args:
@@ -283,6 +277,7 @@ def _norm_key_10min(ts: str):
     return ndt.isoformat(), ndt
 
 def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
+
     """Округляет ``datetime`` вниз до ближайшего шага ``step_minutes``.
 
     Args:
@@ -301,6 +296,7 @@ def _floor_dt_step(dt: datetime, step_minutes: int) -> datetime:
     return datetime.fromtimestamp(floored, tz=dt.tzinfo or timezone.utc)
 
 def _aggregate_by_step(prop_data, step_minutes: int):
+
     """Усредняет временной ряд по заданному шагу.
 
     Args:
@@ -332,6 +328,7 @@ def _aggregate_by_step(prop_data, step_minutes: int):
     return keys_sorted, vals
 
 def _parse_range_cutoff(range_str: str):
+
     """Определяет минимальную дату диапазона из текстового параметра.
 
     Args:
@@ -361,8 +358,8 @@ def _parse_range_cutoff(range_str: str):
         return None
     return None
 
-# ---------- RUDN helpers ----------
 def get_latest_triplet_from_md(md) -> dict:
+
     """Читает свежие показатели температуры, влажности и давления.
 
     Args:
@@ -390,6 +387,7 @@ def get_latest_triplet_from_md(md) -> dict:
     return out
 
 def collect_timeseries_from_md(location_name: str, md) -> None:
+
     """Подготавливает multidatastream для дашборда.
 
     Алгоритм:
@@ -481,8 +479,8 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
             "source": "RUDN"
         }
 
-# ---------- наш сервер helpers ----------
 def get_latest_observation_value_unit(datastream):
+
     """Возвращает актуальное значение одиночного датастрима.
 
     Args:
@@ -494,6 +492,7 @@ def get_latest_observation_value_unit(datastream):
         Используется при отрисовке мини-плиток во всплывающих окнах карты.
     """
 
+
     obs = datastream.get('Observations') or []
     if not obs:
         return None, ""
@@ -503,6 +502,7 @@ def get_latest_observation_value_unit(datastream):
     return (float(v) if v is not None else None), unit
 
 def collect_timeseries_from_thing(location_name: str, thing) -> None:
+
     """Формирует временные ряды для ``Thing`` с одиночными датастримами.
 
     Args:
@@ -566,8 +566,8 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
             "source": "OTHER"
         }
 
-# ---------------- Спаривание ветра (Dm + Sm) ----------------
 def pair_wind(dm_list, sm_list):
+
     """Совмещает измерения направления и скорости ветра.
 
     Args:
@@ -609,6 +609,7 @@ def pair_wind(dm_list, sm_list):
     return pairs
 
 def build_wind_rose_from_pairs(pairs):
+
     """Готовит агрегированные данные для розы ветров.
 
     Args:
@@ -644,9 +645,9 @@ def build_wind_rose_from_pairs(pairs):
     c = [round(sum_speed[t]/counts[t], 2) for t in theta]
     return {"theta": theta, "r": r, "c": c}
 
-# ---------------- Корневая карта: оба сервера ----------------
 @app.route("/")
 def root_map():
+
     """Рендерит корневую карту и наполняет кэш ``dashboard_data``.
 
     Returns:
@@ -716,7 +717,6 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    # RUDN
     url_rudn = f"{RUDN_BASE_URL}/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
@@ -888,9 +888,9 @@ def root_map():
 
     return render_template_string(m._repr_html_())
 
-# ---------------- API для графика ----------------
 @app.route("/api/data/<sensor_key>")
 def api_data(sensor_key):
+
     """Отдаёт временные ряды и данные по ветру для выбранного сенсора.
 
     Query-параметры:
@@ -930,6 +930,7 @@ def api_data(sensor_key):
     agg_map = {"1h": 60, "3h": 180, "1d": 1440}
 
     def _filter_by_cutoff(rows):
+
         """Оставляет только записи, попадающие в заданный диапазон дат."""
 
         if cutoff_dt is None:
@@ -989,9 +990,9 @@ def api_data(sensor_key):
         })
     return json.dumps(result)
 
-# ---------------- Дашборд ----------------
 @app.route("/dashboard/<sensor_key>")
 def dashboard(sensor_key):
+
     """Отрисовывает дашборд для выбранного сенсора.
 
     Args:
@@ -1415,6 +1416,7 @@ def dashboard(sensor_key):
 
 @app.get("/healthz")
 def healthz():
+
     """Возвращает технический статус приложения.
 
     Returns:
