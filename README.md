@@ -1,4 +1,4 @@
-# Геосенсоры: карта и дашборд
+# Визуализация данных с двух Frost Servers
  
 -Flask-приложение было развернуто с помощью Yandex Cloud, Serverless Containers
 Веб-приложение на Flask, которое собирает данные с двух серверов [OGC SensorThings API](https://www.ogc.org/standards/sensorthings) и визуализирует их на интерактивной карте с дашбордом. Источники данных:
