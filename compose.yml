@@ -9,15 +9,9 @@ services:
     env_file:
       - .env
 
-    # Явно пробрасываем переменные в контейнер (с дефолтами на случай пустого .env)
-    environment:
-      RUDN_BASE_URL: ${RUDN_BASE_URL:-http://94.154.11.74/frost/v1.1}
-      OTHER_BASE_URL: ${OTHER_BASE_URL:-http://90.156.134.128:8080/FROST-Server/v1.1}
-      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-300}
-      FLASK_ENV: ${FLASK_ENV:-production}
-
     # Внешний порт вынесен в HOST_PORT (по умолчанию 18080)
     ports:
       - "${HOST_PORT:-18080}:8080"
 
     restart: unless-stopped
+
