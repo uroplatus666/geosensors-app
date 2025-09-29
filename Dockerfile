@@ -13,7 +13,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Немного подстрахуем сборку shapely/pyproj (обычно есть manylinux-колёса, но пусть будет)
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,3 +36,4 @@ CMD sh -c "/app/.venv/bin/gunicorn \
   -b 0.0.0.0:${PORT} \
   --timeout ${GUNICORN_TIMEOUT} \
   hse_geosensors:app"
+
