@@ -66,11 +66,10 @@ uv run flask --app hse_geosensors:app run --debug --port 8080
 
 В файле `.env.example` приведена структура файла .env, куда можно ввести свои секреты
 
-| Переменная       | Назначение                                                      | Значение по умолчанию         |
-|------------------|-----------------------------------------------------------------|-------------------------------|
-| `HOST_PORT`      | Введите сюда удобный для вас порт                               |<your port>                    |
-| `REGISTRY_ID`    | Ваш registry id на Yandex Cloud                                 |<REGISTRY_ID>                  |
-| `IMAGE`          | Задайте registry id на Yandex Cloud и name образа               |cr.yandex/${REGISTRY_ID}/{name}|
+| Переменная       | Назначение                                                      | Значение по умолчанию             |
+|------------------|-----------------------------------------------------------------|-----------------------------------|
+| `HOST_PORT`      | Введите сюда удобный для вас порт                               |<HOST_PORT>                        |
+| `REGISTRY_ID`    | Ваш registry id на Yandex Cloud                                 |<REGISTRY_ID>                      |
 
 ## Запуск в Docker
 
@@ -113,7 +112,7 @@ APP_URL="$(yc serverless container get --name geosensors --format yaml | awk '/^
 echo "$APP_URL"
 curl -I "$APP_URL"
 ```
-### Как удалить старые образы из Yandex Cloud
+#### Как удалить старые образы из Yandex Cloud
 ```bash
 yc container registry list
 yc container repository list --registry-id {ID of registry}
