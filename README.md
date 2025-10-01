@@ -79,8 +79,6 @@ docker compose -f compose.yml build
 docker compose -f compose.yml up -d
 ```
 
-Ожидается, что в `.env` определены `IMAGE`, `TAG` и (опционально) переменные из таблицы выше. Контейнер слушает порт `8080` и пробрасывается наружу через `HOST_PORT` (по умолчанию 18080).
-
 ## Запуск в Yandex Cloud
 Деплой Flask-приложения в Yandex Cloud, Serverless Containers
 
