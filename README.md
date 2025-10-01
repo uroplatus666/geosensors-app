@@ -1,7 +1,8 @@
 # Визуализация данных с двух Frost Servers
  
--Flask-приложение было развернуто с помощью Yandex Cloud, Serverless Containers
-Веб-приложение на Flask, которое собирает данные с двух серверов [OGC SensorThings API](https://www.ogc.org/standards/sensorthings) и визуализирует их на интерактивной карте с дашбордом. Источники данных:
+Веб-приложение на Flask, было развернуто с помощью Yandex Cloud, Serverless Containers. Оно собирает данные с двух серверов [OGC SensorThings API](https://www.ogc.org/standards/sensorthings) и визуализирует их на интерактивной карте с дашбордом. Источники данных:
+- http://94.154.11.74/frost/v1.1
+- http://90.156.134.128:8080/FROST-Server/v1.1
 
 Демонстрационный развёрнутый экземпляр: <https://bbau4bc4rnl6lkjbklbp.containers.yandexcloud.net/>
 
@@ -18,11 +19,15 @@
 
 ```
 .
-├── Dockerfile         # Образ для продакшена (Gunicorn  uv)
+├── .env               # Переменные окружения
+├── .dockerignore      # Исключения для Docker
+├── .gitignore         # Исключения для Git
 ├── compose.yml        # Docker Compose со сборкой и прокидыванием окружения
-├── hse_geosensors.py  # Основной модуль приложения и все обработчики
-├── pyproject.toml     # Зависимости и метаданные проекта
-├── uv.lock            # Замороженные версии для uv
+├── pyproject.toml     # Метаданные и зависимости
+├── uv.lock            # Блокировка версий зависимостей
+├── Dockerfile         # Docker-образ
+├── hse_geosensors.py  # Основной код приложения
+├── output/            # Папка для статических данных
 └── README.md          # Вы читаете этот файл
 ```
 
@@ -59,31 +64,68 @@ uv run flask --app hse_geosensors:app run --debug --port 8080
 
 ## Переменные окружения
 
-| Переменная        | Назначение                                                                 | Значение по умолчанию |
-|-------------------|----------------------------------------------------------------------------|------------------------|
-| `RUDN_BASE_URL`   | Базовый URL SensorThings API РУДН                                         | `http://94.154.11.74/frost/v1.1` |
-| `OTHER_BASE_URL`  | Базовый URL второго сервера SensorThings                                  | `http://90.156.134.128:8080/FROST-Server/v1.1` |
-| `REQUEST_TIMEOUT` | Таймаут HTTP-запросов к API (секунды)                                      | `300` |
-| `PORT`            | Локальный порт для Flask (и Gunicorn в Docker)                            | `8080` |
-| `FLASK_ENV`       | Режим Flask (`development` включает автоперезапуск и debug-инструменты)   | `production` |
-| `GUNICORN_*`      | Тюнниг воркеров/потоков Gunicorn при запуске в контейнере                 | см. `Dockerfile` |
+В файле `.env.example` приведена структура файла .env, куда можно ввести свои секреты
 
-Добавьте файл `.env`, чтобы переопределить значения при локальном запуске или через Compose.
+| Переменная       | Назначение                                                      | Значение по умолчанию         |
+|------------------|-----------------------------------------------------------------|-------------------------------|
+| `HOST_PORT`      | Введите сюда удобный для вас порт                               |<your port>                    |
+| `REGISTRY_ID`    | Ваш registry id на Yandex Cloud                                 |<REGISTRY_ID>                  |
+| `IMAGE`          | Задайте registry id на Yandex Cloud и name образа               |cr.yandex/${REGISTRY_ID}/{name}|
 
 ## Запуск в Docker
 
 ```bash
-docker compose --env-file .env up --build
+docker compose -f compose.yml build
+docker compose -f compose.yml up -d
 ```
 
 Ожидается, что в `.env` определены `IMAGE`, `TAG` и (опционально) переменные из таблицы выше. Контейнер слушает порт `8080` и пробрасывается наружу через `HOST_PORT` (по умолчанию 18080).
 
+## Запуск в Yandex Cloud
+Деплой Flask-приложения в Yandex Cloud, Serverless Containers
+
+- Собираем и пушим
+```bash
+docker compose -f compose.yml build
+docker compose -f compose.yml push
+```
+- Загружаем переменные окружения из .env
+```bash
+set -a
+source .env
+set +a
+```
+- Проверяем наличие нужных
+```bash
+echo "Image: $IMAGE"
+echo "Service Account ID: $service_account_id"
+echo "REGISTRY_ID: $REGISTRY_ID"
+```
+- Настраиваем deploy
+```bash
+yc serverless container revision deploy --container-name geosensors --image "$IMAGE:$TAG" --service-account-id "$service_account_id" --environment FLASK_ENV=production --execution-timeout 300s --cores 1 --memory 3GB --concurrency 1
+```
+```bash
+yc serverless container add-access-binding --name geosensors --role serverless.containers.invoker --subject system:allUsers
+```
+```bash
+APP_URL="$(yc serverless container get --name geosensors --format yaml | awk '/^url: /{print $2}')"
+echo "$APP_URL"
+curl -I "$APP_URL"
+```
+### Как удалить старые образы из Yandex Cloud
+```bash
+yc container registry list
+yc container repository list --registry-id {ID of registry}
+yc container image list --registry-id {ID of registry} --repository-name {name of repository}
+yc container image delete {ID_ОБРАЗА}
+```
 ## API
 
 - `GET /` — интерактивная карта с маркерами локаций и ссылками на дашборды.
 - `GET /dashboard/<sensor_key>` — HTML-дашборд конкретного сенсора с графиками Plotly.
 - `GET /api/data/<sensor_key>?metrics=[...]&range=7d&agg=1h` — данные для построения графиков (временные ряды и роза ветров). Ответ формируется на основе кэша `dashboard_data`, наполняемого при открытии карты.
-- `GET /healthz` — служебная проверка «живости» приложения.
+- `GET /healthz` — служебная проверка
 
 `sensor_key` соответствует идентификатору, который формируется для MultiDatastream/Datastream внутри попапов карты (например, `MD__12345` или `DS__thingId__datastreamId`).
 
