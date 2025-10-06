@@ -68,7 +68,7 @@ uv run flask --app hse_geosensors:app run --debug --port 8080
 
 | Переменная              | Назначение                              | Значение по умолчанию             |
 |-------------------------|-----------------------------------------|-----------------------------------|
-| `HOST_PORT`             | Введите сюда удобный для вас порт       |<HOST_PORT>                        |
+| `HOST_PORT`             | Порт на хосте для проброса Docker       |<HOST_PORT>                        |
 | `REGISTRY_ID`           | Ваш registry id в Yandex Cloud          |<REGISTRY_ID>                      |
 | `service_account_id`    | Ваш service_account_id в Yandex Cloud   |<service_account_id>                      |
 
