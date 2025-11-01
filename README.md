@@ -78,7 +78,8 @@ uv run flask --app hse_geosensors:app run --debug --port 8080
 docker compose -f compose.yml build
 docker compose -f compose.yml up -d
 ```
-
+Сервер здесь: `http://127.0.0.1:<port>/`.
+   
 ## Запуск в Yandex Cloud
 Деплой Flask-приложения в Yandex Cloud, Serverless Containers
 
