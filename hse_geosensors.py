@@ -74,13 +74,18 @@ TARGET_PROPS_RUDN = {
 """Описания целевых датастримов второго сервера SensorThings."""
 TARGET_DS_LIST = [
     "Ощущаемая температура воздуха",
-    "Влажность воздуха",
-    "Концентрация CO2",
+    "Температура воздуха",
+    "Относительная влажность воздуха",
+    "Концентрация углекислого газа",
+    "Атмосферное давление"
 ]
+
 TARGET_PROPS_DS = {
     "Ощущаемая температура воздуха": {"name": "ApparentTemperature", "desc": "Ощущаемая температура воздуха", "color": colors[0], "unit": "°C", "icon": "thermometer-half"},
-    "Влажность воздуха":              {"name": "Humidity",            "desc": "Влажность воздуха",             "color": colors[1], "unit": "%",   "icon": "droplet"},
-    "Концентрация CO2":               {"name": "CO2",                 "desc": "Концентрация CO2",              "color": colors[2], "unit": "ppm", "icon": "cloud-haze2"},
+    "Температура воздуха": {"name": "ApparentTemperature", "desc": "Температура воздуха", "color": colors[0], "unit": "°C", "icon": "thermometer-half"},
+    "Относительная влажность воздуха": {"name": "Humidity", "desc": "Относительная влажность воздуха", "color": colors[1], "unit": "%", "icon": "droplet"},
+    "Концентрация углекислого газа": {"name": "CO2",                 "desc": "Концентрация углекислого газа","color": colors[2], "unit": "ppm", "icon": "cloud-haze2"},
+    "Атмосферное давление":          {"name": "Pressure",            "desc": "Атмосферное давление",          "color": colors[2], "unit": "Pa",   "icon":  "cloud"},
 }
 
 """Кэш подготовленных временных рядов для страниц дашборда."""
@@ -473,6 +478,7 @@ def collect_timeseries_from_md(location_name: str, md) -> None:
                 {"name": "Pa", "desc": TARGET_PROPS_RUDN["Pa"]["desc"], "icon": TARGET_PROPS_RUDN["Pa"]["icon"],
                  "color": TARGET_PROPS_RUDN["Pa"]["color"], "unit": TARGET_PROPS_RUDN["Pa"]["unit"]},
             ],
+
             "title": f"{md_id}, {location_name}",
             "dm_series": dm_series,
             "sm_series": sm_series,
@@ -524,15 +530,17 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
     if not datastreams:
         return
 
-    values, obs_props = [], []
+    values, obs_props, targets = [], [], []
     for ds in datastreams:
-        ds_name = ds.get('name', '')
-        if ds_name in TARGET_PROPS_DS:
-            cfg = TARGET_PROPS_DS[ds_name]
+        obs_prop_info = ds.get('ObservedProperty')
+        obs_prop_name = obs_prop_info.get('name', '')
+        targets.append(obs_prop_name)
+        if obs_prop_name in TARGET_PROPS_DS:
+            cfg = TARGET_PROPS_DS[obs_prop_name]
         else:
             cfg = {
-                "name": ds_name or f"DS-{ds.get('@iot.id')}",
-                "desc": ds_name or f"Datastream {ds.get('@iot.id')}",
+                "name": obs_prop_name or f"DS-{ds.get('@iot.id')}",
+                "desc": obs_prop_name,
                 "color": colors[(3 + len(obs_props)) % len(colors)],
                 "unit": (ds.get('unitOfMeasurement') or {}).get('symbol', ''),
                 "icon": "activity"
@@ -556,15 +564,18 @@ def collect_timeseries_from_thing(location_name: str, thing) -> None:
     if values:
         loc_key = make_safe_key(location_name)
         key = f"DS__{loc_key}__{make_safe_key(thing_name)}"
+        target_props_for_cards = [TARGET_PROPS_DS[nm] for nm in targets if nm in TARGET_PROPS_DS]
         dashboard_data[key] = {
             "values": values,
             "obs_props": obs_props,
-            "target_props": [TARGET_PROPS_DS[nm] for nm in TARGET_DS_LIST if nm in TARGET_PROPS_DS],
+            "target_props": target_props_for_cards,
             "title": f"{thing_name}, {location_name}",
             "dm_series": [],
             "sm_series": [],
             "source": "OTHER"
         }
+        return target_props_for_cards
+    return []
 
 def pair_wind(dm_list, sm_list):
 
@@ -686,6 +697,7 @@ def root_map():
             .mini-apparenttemperature { background:rgba(200,162,200,.2); }
             .mini-humidity            { background:rgba(135,206,235,.2); }
             .mini-co2                 { background:rgba(95,106,121,.2); }
+            .mini-pressure            { background:rgba(95,106,121,.2); }
 
             .mini-icon { font-size:1.6em; }
             .mini-value { font-size:1.15em; font-weight:700; }
@@ -717,7 +729,7 @@ def root_map():
     marker_cluster = MarkerCluster().add_to(m)
     icon_url = 'https://cdn-icons-png.flaticon.com/512/10338/10338121.png'
 
-    url_rudn = f"{RUDN_BASE_URL}/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
+    url_rudn = f"{RUDN_BASE_URL}/Locations?$expand=Things($expand=MultiDatastreams($expand=Observations($orderby=phenomenonTime desc;$top=10000)))"
     try:
         logger.debug("RUDN запрос: %s", url_rudn)
         resp = requests.get(url_rudn, timeout=REQUEST_TIMEOUT)
@@ -797,7 +809,19 @@ def root_map():
         ).add_to(marker_cluster)
 
     # Второй сервер
-    url_ds = f"{OTHER_BASE_URL}/Locations?$expand=Things($expand=Datastreams($expand=Observations($orderby=phenomenonTime desc;$top=100000000)))"
+    url_ds = (
+        f"{OTHER_BASE_URL}/Locations?"
+        "$expand=Things("
+        "$expand=Datastreams("
+        "$expand=Observations($orderby=phenomenonTime desc;$top=100000),"
+        "ObservedProperty"
+        ")),"
+        "HistoricalLocations($expand=Thing("
+        "$expand=Datastreams("
+        "$expand=Observations($orderby=phenomenonTime desc;$top=100000),"
+        "ObservedProperty"
+        ")))"
+    )
     try:
         logger.debug("OTHER запрос: %s", url_ds)
         resp2 = requests.get(url_ds, timeout=REQUEST_TIMEOUT)
@@ -815,10 +839,13 @@ def root_map():
             continue
         lat, lon = coords
 
-        things = (loc.get('Things') or [])
+        things = loc.get('Things') or []
+        if not things:
+            hlocs = loc.get('HistoricalLocations') or []
+            things = [hl.get('Thing') for hl in hlocs if hl.get('Thing')]
+
         container_id = f"DS-{make_safe_key(location_name)}"
         popup_html = [f'<div id="{container_id}" class="sensor-popup"><h4>{location_name}</h4>']
-
         if not things:
             popup_html.append('<p>К этой локации не привязаны сенсоры</p>')
         else:
@@ -842,14 +869,16 @@ def root_map():
                 datastreams = th.get('Datastreams') or []
                 key = f"DS__{make_safe_key(location_name)}__{make_safe_key(tname)}"
 
-                collect_timeseries_from_thing(location_name, th)
+                target_props_for_cards = collect_timeseries_from_thing(location_name, th)
 
                 latest_values = {}
                 for prop_title in TARGET_DS_LIST:
                     for ds in datastreams:
-                        if ds.get('name') == prop_title:
+                        obs_prop_info = ds.get('ObservedProperty')
+                        obs_prop_name = obs_prop_info.get('name', '')
+                        if obs_prop_name == prop_title:
                             v, u = get_latest_observation_value_unit(ds)
-                            latest_values[prop_title] = (v, u)
+                            latest_values[obs_prop_name] = (v, u)
                             break
 
                 display = "block" if i == 0 else "none"
@@ -859,7 +888,7 @@ def root_map():
                     popup_html.append('<p class="text-muted mb-2">Нет данных (Observations)</p>')
                 else:
                     popup_html.append('<div class="mini-metrics">')
-                    for title in TARGET_DS_LIST:
+                    for title in latest_values.keys():
                         cfg = TARGET_PROPS_DS[title]
                         v = latest_values.get(title)
                         s = f"{round(v[0],1)}{v[1]}" if v and v[0] is not None else "—"
@@ -1025,10 +1054,11 @@ def dashboard(sensor_key):
     # текущие карточки: берём последние известные значения целевых параметров (по первым попавшимся точкам)
     current = {}
     for tcfg in target_props:
-        pname = tcfg["name"]
-        v = next((vv for vv in values if vv["prop"] == pname), None)
+        print(tcfg['name'])
+        v = next((vv for vv in values if vv["prop"] == tcfg['name']), None)
+
         if v:
-            current[pname] = {"value": v["value"], "unit": tcfg["unit"], "desc": tcfg["desc"], "icon": tcfg["icon"]}
+            current[tcfg['name']] = {"value": v["value"], "unit": tcfg["unit"], "desc": tcfg["desc"], "icon": tcfg["icon"]}
 
     dir_str = "—"
     last_dm = None
@@ -1165,6 +1195,11 @@ def dashboard(sensor_key):
                 <div class="metric-icon"><i class="bi bi-cloud-haze2"></i></div>
                 <div class="metric-value">{{ (current.CO2.value|round(1)) ~ current.CO2.unit }}</div>
                 <div class="metric-label">{{ current.CO2.desc }}</div>
+            </div>{% endif %}
+            {% if current.Pressure %}<div class="metric-card pressure-card">
+                <div class="metric-icon"><i class="bi bi-cloud"></i></div>
+                <div class="metric-value">{{ (current.Pressure.value|round(1)) ~ current.Pressure.unit }}</div>
+                <div class="metric-label">{{ current.Pressure.desc }}</div>
             </div>{% endif %}
         </div>
 
