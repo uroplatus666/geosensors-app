@@ -1,6 +1,6 @@
 # Визуализация данных сенсоров и пространственных данных
  
-Веб-приложение на Flask, было развернуто с помощью Yandex Cloud, Serverless Containers. Оно собирает данные с двух серверов [OGC SensorThings API](https://www.ogc.org/standards/sensorthings) и визуализирует их на интерактивной карте с дашбордом. Источники данных:
+Веб-приложение на Flask собирает данные с двух серверов [OGC SensorThings API](https://www.ogc.org/standards/sensorthings) и визуализирует их на интерактивной карте с дашбордом. Источники данных:
 - БД PostgreSQL с даннными с FrostServers (docker image: `uroplatus666/frosts-db:latest`)
 - БД PostgreSQL с векторными и растровыми данными (docker image: `uroplatus666/gis-db:latest`)
 
