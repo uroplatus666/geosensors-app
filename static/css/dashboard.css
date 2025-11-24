@@ -1,0 +1,266 @@
+/* static/css/dashboard.css */
+
+/* Основные стили */
+body { 
+    background-color: #f8f9fa; 
+    color: #212529; 
+}
+
+/* Навигация */
+.navbar-dark.bg-primary { 
+    background-color: #2F4F4F !important; /* DARK_GREEN */
+    padding-right: 170px !important; 
+}
+
+.navbar .container-fluid { 
+    padding-top: 6px; 
+    padding-bottom: 6px; 
+}
+
+.navbar-brand { 
+    font-size: 0.95rem; 
+    cursor: pointer; 
+}
+
+/* Фиксированная кнопка выбора сенсора */
+.sensor-dropdown-fixed {
+    position: fixed;
+    top: 10px;
+    right: 20px;
+    z-index: 1050;
+}
+
+/* Заголовок сенсора в навбаре */
+.sensor-header { 
+    display: flex; 
+    align-items: center; 
+    gap: 10px; 
+    margin-left: auto; 
+    max-width: calc(100% - 200px); 
+}
+
+.sensor-logo { 
+    width: 32px; 
+    height: 32px; 
+    border-radius: 8px; 
+    background: white; 
+    padding: 4px; 
+}
+
+.sensor-header h2 { 
+    font-size: 1.1rem; 
+    margin: 0; 
+    font-weight: 700;
+    white-space: normal; 
+    word-wrap: break-word;
+}
+
+/* Карточки метрик */
+.metrics-container { 
+    display: flex; 
+    gap: 20px; 
+    margin: 16px 0 18px 0; 
+    flex-wrap: wrap; 
+}
+
+.metric-card { 
+    background: white; 
+    border: none; 
+    border-radius: 12px; 
+    padding: 18px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05); 
+    flex: 1; 
+    min-width: 260px; 
+}
+
+.metric-icon { font-size: 2rem; margin-bottom: 6px; }
+.metric-value { font-size: 2.0rem; font-weight: 700; }
+.metric-label { opacity: .8; }
+
+/* Цветовые схемы карточек (заменены переменные Jinja на HEX) */
+/* Ta, ApparentTemperature -> colors[0] (#C8A2C8) */
+.metric-card.card-Ta, .metric-card.card-ApparentTemperature { 
+    background: rgba(200,162,200,0.08); 
+    border-left: 4px solid #C8A2C8; 
+}
+/* Ua, Humidity -> colors[1] (#87CEEB) */
+.metric-card.card-Ua, .metric-card.card-Humidity { 
+    background: rgba(135,206,235,0.08); 
+    border-left: 4px solid #87CEEB; 
+}
+/* Pa, Pressure, CO2 -> colors[2] (#5F6A79) */
+.metric-card.card-Pa, .metric-card.card-Pressure, .metric-card.card-CO2 { 
+    background: rgba(95,106,121,0.08); 
+    border-left: 4px solid #5F6A79; 
+}
+/* Sm, Sn, Sx, Dm -> colors[5] (#4682B4) */
+.metric-card.card-Sm, .metric-card.card-Sn, .metric-card.card-Sx, .metric-card.card-Dm { 
+    background: rgba(70,130,180,0.08); 
+    border-left: 4px solid #4682B4; 
+}
+/* Rc -> colors[9] (#20B2AA) */
+.metric-card.card-Rc { 
+    background: rgba(32,178,170,0.08); 
+    border-left: 4px solid #20B2AA; 
+}
+/* PM2.5 -> colors[4] (#A0522D) */
+.metric-card.card-PM2_5 { 
+    background: rgba(160,82,45,0.08); 
+    border-left: 4px solid #A0522D; 
+}
+/* PM10 -> colors[6] (#556B2F) */
+.metric-card.card-PM10 { 
+    background: rgba(85,107,47,0.08); 
+    border-left: 4px solid #556B2F; 
+}
+
+/* Виджеты ветра */
+.wind-row { 
+    display: flex; 
+    gap: 18px; 
+    align-items: stretch; 
+    margin-bottom: 16px; 
+}
+
+.wind-widget { 
+    flex: 1; 
+    display: flex; 
+    gap: 16px; 
+    align-items: center; 
+    background: white; 
+    border-radius: 12px; 
+    padding: 14px; 
+    box-shadow: 0 4px 12px rgba(0,0,0,.05); 
+}
+
+.rose-card { 
+    flex: 1; 
+    background: white; 
+    border-radius: 12px; 
+    padding: 14px; 
+    box-shadow: 0 4px 12px rgba(0,0,0,.05); 
+}
+
+.wind-face { 
+    width: 160px; 
+    height: 160px; 
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, #fff, #f3f4f6);
+    border: 1px solid #e5e7eb; 
+    position: relative; 
+}
+
+.wind-face .tick { 
+    position: absolute; 
+    width: 2px; 
+    height: 8px; 
+    background: #c7c7c7;
+    left: calc(50% - 1px); 
+    top: 6px; 
+    transform-origin: 1px 66px; 
+}
+
+.wind-face .label { 
+    position: absolute; 
+    font-weight: 600; 
+    color: #5b6169; 
+    font-size: 12px; 
+}
+
+.wind-needle { 
+    position: absolute; 
+    left: 50%; 
+    top: 50%; 
+    width: 0; 
+    height: 0; 
+    transform-origin: 0 0; 
+}
+
+.wind-needle svg { 
+    transform: translate(-5px, -68px); 
+}
+
+/* Графики и сайдбар */
+.graph-section { 
+    display: flex; 
+    gap: 18px; 
+    align-items: stretch; 
+}
+
+.graph-wrap { flex: 1; }
+
+.metrics-sidebar { width: 340px; }
+
+.sidebar-inner { 
+    background: white; 
+    border-radius: 12px; 
+    padding: 14px; 
+    box-shadow: 0 4px 12px rgba(0,0,0,.05); 
+    position: sticky; 
+    top: 12px; 
+}
+
+.wrap-select { 
+    font-size: 0.92rem; 
+    line-height: 1.35; 
+}
+
+.wrap-select option { 
+    font-size: 0.92rem; 
+    line-height: 1.35; 
+    white-space: normal; 
+    word-break: break-word; 
+}
+
+.graph-card { 
+    background: white; 
+    border-radius: 12px; 
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    overflow: hidden; 
+    display: flex; 
+    flex-direction: column; 
+    width: 100%; 
+    min-height: 520px; 
+}
+
+.graph-header { 
+    padding: 12px 16px; 
+    border-bottom: 1px solid #eee; 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    gap: 12px; 
+    flex-wrap: wrap; 
+}
+
+.graph-title { 
+    font-weight: 600; 
+    margin-bottom: 0; 
+}
+
+.graph-body { 
+    padding: 0; 
+    flex: 1; 
+}
+
+#plotly-graph { 
+    height: 100% !important; 
+    width: 100% !important; 
+}
+
+/* Адаптив */
+@media (max-width: 992px) { 
+    .wind-row { flex-direction: column; } 
+    .sensor-dropdown-fixed { 
+        position: relative; 
+        top: auto; 
+        right: auto; 
+        margin-bottom: 15px; 
+    }
+    .navbar-dark.bg-primary { 
+        padding-right: 15px !important; 
+    }
+    .sensor-header { max-width: 100%; }
+    .graph-section { flex-direction: column; }
+    .metrics-sidebar { width: auto; }
+}

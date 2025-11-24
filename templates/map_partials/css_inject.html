@@ -1,0 +1,61 @@
+<!-- Подключение шрифтов и стилей -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&family=Poppins:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+
+<!-- Подключение нашего локального файла стилей карты -->
+<link rel="stylesheet" href="/static/css/map.css">
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- Небольшой скрипт для переключения табов внутри попапа сенсора -->
+<script>
+    function switchThing(containerId, thingId) {
+        // Скрываем все метрики в этом контейнере
+        document.querySelectorAll('#' + containerId + ' .thing-metrics').forEach(el => el.style.display = 'none');
+        // Показываем нужный
+        const shown = document.getElementById('metrics-thing-' + thingId);
+        if (shown) shown.style.display = 'block';
+        
+        // Переключаем кнопки дашборда
+        document.querySelectorAll('#' + containerId + ' .dash-btn').forEach(el => el.style.display='none');
+        const btn = document.getElementById('btn-thing-' + thingId);
+        if (btn) btn.style.display='inline-block';
+    }
+</script>
+
+<!-- Панель управления GIS слоями (Верстка) -->
+<div class="gis-control-wrap">
+    <div class="d-flex justify-content-between align-items-center">
+        <h5>Пространственные данные</h5>
+        <span class="toggle-gis-btn" onclick="document.getElementById('gis-body').style.display = document.getElementById('gis-body').style.display === 'none' ? 'block' : 'none'">
+            Свернуть
+        </span>
+    </div>
+    
+    <div id="gis-body">
+        <label>Растровый слой:</label>
+        <select id="raster-select">
+            <option value="">— не выбран —</option>
+            {% for r in raster_layers %}
+            <option value="{{ r.schema }}.{{ r.name }}">{{ r.name }}</option>
+            {% endfor %}
+        </select>
+        
+        <label style="margin-top:8px;">Прозрачность:</label>
+        <input type="range" id="raster-opacity" min="0" max="1" step="0.1" value="0.7"/>
+        
+        <label style="margin-top:12px;">Векторные слои:</label>
+        <div class="vector-checkboxes">
+            {% for v in vector_layers %}
+            <label>
+                <input type="checkbox" class="vector-checkbox" value="{{ v.schema }}.{{ v.name }}" 
+                       {% if v.name in safe_whitelist %}checked{% endif %}> 
+                {{ v.name }}
+            </label>
+            {% endfor %}
+        </div>
+        
+        <div class="small-muted">Подгрузка слоев происходит из GIS-БД.</div>
+    </div>
+</div>

@@ -1,0 +1,132 @@
+<script>
+window.addEventListener("load", function() {
+    console.log("Window loaded, searching for Leaflet map...");
+    
+    let mapInstance = null;
+    
+    // Поиск глобального объекта карты Leaflet, созданного Folium
+    for (let key in window) {
+        if (window[key] && typeof window[key] === 'object' && window[key].hasOwnProperty('_leaflet_id')) {
+             if (window[key] instanceof L.Map) {
+                mapInstance = window[key];
+                break;
+             }
+        }
+    }
+    
+    if (!mapInstance) { 
+        console.error("Leaflet map not found."); 
+        return; 
+    }
+
+    let rasterLayer = null;
+    const vectorLayers = new Map();
+
+    // --- Функции загрузки слоев ---
+
+    async function loadRaster(qualname) {
+        if (rasterLayer) { 
+            mapInstance.removeLayer(rasterLayer); 
+            rasterLayer = null; 
+        }
+        if (!qualname) return;
+        
+        const [schema, table] = qualname.split('.', 2);
+        const url = `/api/gis/raster?schema=${schema}&table=${table}`;
+
+        try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(await r.text());
+            const js = await r.json();
+            
+            const opacity = parseFloat(document.getElementById('raster-opacity').value);
+            
+            rasterLayer = L.imageOverlay(js.data_url, js.bounds, {
+                opacity: opacity,
+                pane: 'overlayPane', 
+                interactive: false
+            }).addTo(mapInstance);
+            
+            mapInstance.fitBounds(js.bounds);
+        } catch(e) { 
+            console.error('Raster error:', e); 
+        }
+    }
+
+    async function ensureVector(qualname) {
+        if (vectorLayers.has(qualname)) return;
+        
+        const [schema, table] = qualname.split('.', 2);
+        const url = `/api/gis/geojson?schema=${schema}&table=${table}`;
+        
+        try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(await r.text());
+            const gj = await r.json();
+            
+            if (!gj || !gj.features || !gj.features.length) return;
+
+            const lyr = L.geoJSON(gj, {
+                style: { 
+                    color: '#ff4500', 
+                    weight: 3, 
+                    opacity: 1, 
+                    fillColor: '#ff8c00', 
+                    fillOpacity: 0.3 
+                },
+                pointToLayer: (f, latlng) => L.circleMarker(latlng, { 
+                    radius: 6, 
+                    color: '#000', 
+                    weight: 1, 
+                    fillColor: '#ff4500', 
+                    fillOpacity: 0.9 
+                }),
+                onEachFeature: (f, l) => { 
+                    if (f.properties) {
+                        l.bindPopup('<div style="max-height:200px;overflow:auto"><pre>' + 
+                            JSON.stringify(f.properties, null, 2) + 
+                        '</pre></div>'); 
+                    }
+                }
+            }).addTo(mapInstance);
+            
+            lyr.bringToFront();
+            vectorLayers.set(qualname, lyr);
+        } catch(e) { 
+            console.error('Vector error:', e); 
+        }
+    }
+
+    function disableVector(qualname) {
+        const lyr = vectorLayers.get(qualname);
+        if (lyr) { 
+            mapInstance.removeLayer(lyr); 
+            vectorLayers.delete(qualname); 
+        }
+    }
+
+    // --- Привязка событий ---
+
+    const rasterSelect = document.getElementById('raster-select');
+    if (rasterSelect) {
+        rasterSelect.addEventListener('change', e => loadRaster(e.target.value));
+    }
+
+    const opacityInput = document.getElementById('raster-opacity');
+    if (opacityInput) {
+        opacityInput.addEventListener('input', e => {
+            if (rasterLayer) rasterLayer.setOpacity(parseFloat(e.target.value));
+        });
+    }
+    
+    document.querySelectorAll('.vector-checkbox').forEach(cb => {
+        cb.addEventListener('change', () => {
+            if (cb.checked) ensureVector(cb.value);
+            else disableVector(cb.value);
+        });
+    });
+    
+    // Загрузка дефолтных включенных векторов
+    document.querySelectorAll('.vector-checkbox:checked').forEach(cb => ensureVector(cb.value));
+});
+</script>
