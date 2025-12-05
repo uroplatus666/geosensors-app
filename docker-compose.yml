@@ -34,20 +34,20 @@ services:
           sys.exit(f"timeout waiting for {label}")
 
       wait_db(
-          ${PGHOST},
-          ${PGPORT},
-          ${PGDATABASE},
-          ${PGUSER},
-          ${PGPASSWORD},
+          "${PGHOST}",
+          "${PGPORT}",
+          "${PGDATABASE}",
+          "${PGUSER}",
+          "${PGPASSWORD}",
           "GIS"
       )
 
       wait_db(
-          ${DB_HOST},
-          ${DB_PORT},
-          ${DB_NAME},
-          ${DB_USER},
-          ${DB_PASS},
+          "${DB_HOST}",
+          "${DB_PORT}",
+          "${DB_NAME}",
+          "${DB_USER}",
+          "${DB_PASS}",
           "FROST"
       )
       PY
