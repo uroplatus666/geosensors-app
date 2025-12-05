@@ -4,22 +4,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Настройки Flask
-CACHE_TYPE = "null"
-
 # --- БД СЕНСОРОВ (Frost) ---
-SENSOR_DB_HOST = os.getenv("DB_HOST", "db-frost")
-SENSOR_DB_PORT = os.getenv("DB_PORT", "5433")
-SENSOR_DB_NAME = os.getenv("DB_NAME", "frost")
-SENSOR_DB_USER = os.getenv("DB_USER", "frost")
-SENSOR_DB_PASS = os.getenv("DB_PASS", "frost")
+SENSOR_DB_HOST = os.getenv("DB_HOST")
+SENSOR_DB_PORT = os.getenv("DB_PORT")
+SENSOR_DB_NAME = os.getenv("DB_NAME")
+SENSOR_DB_USER = os.getenv("DB_USER")
+SENSOR_DB_PASS = os.getenv("DB_PASS")
 
 # --- БД GIS (Spatial) ---
-GIS_DB_HOST = os.getenv("PGHOST", "db-spatial")
-GIS_DB_PORT = int(os.getenv("PGPORT", "5432"))
-GIS_DB_NAME = os.getenv("PGDATABASE", "gis")
-GIS_DB_USER = os.getenv("PGUSER", "pguser")
-GIS_DB_PASS = os.getenv("PGPASSWORD", "pgpass")
+GIS_DB_HOST = os.getenv("PGHOST")
+GIS_DB_PORT = os.getenv("PGPORT")
+GIS_DB_NAME = os.getenv("PGDATABASE")
+GIS_DB_USER = os.getenv("PGUSER")
+GIS_DB_PASS = os.getenv("PGPASSWORD")
+
+PORT = os.getenv("PORT")
 
 # --- Константы интерфейса ---
 COLORS = [

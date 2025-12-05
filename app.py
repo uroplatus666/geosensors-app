@@ -326,4 +326,4 @@ def generate_popup_html(loc_id, loc_data, things):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", debug=True, port=int(config.os.getenv("PORT")))
+    app.run(host="0.0.0.0", debug=True, port=config.PORT)

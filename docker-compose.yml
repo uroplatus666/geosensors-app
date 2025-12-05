@@ -2,9 +2,9 @@ services:
   frontend:
     build: .
     ports:
-      - "${PORT:-8080}:${PORT:-8080}"
+      - "${PORT}:${PORT}"
     env_file:
-      - .env.docker
+      - .env
     depends_on:
       db-spatial:
         condition: service_healthy
@@ -34,20 +34,20 @@ services:
           sys.exit(f"timeout waiting for {label}")
 
       wait_db(
-          os.getenv("GIS_DB_HOST", "db-spatial"),
-          int(os.getenv("GIS_DB_PORT", "5432")),
-          os.getenv("GIS_DB_NAME", "gis"),
-          os.getenv("GIS_DB_USER", "pguser"),
-          os.getenv("GIS_DB_PASS", "pgpass"),
+          ${PGHOST},
+          ${PGPORT},
+          ${PGDATABASE},
+          ${PGUSER},
+          ${PGPASSWORD},
           "GIS"
       )
 
       wait_db(
-          os.getenv("FROST_DB_HOST", "db-frost"),
-          int(os.getenv("FROST_DB_PORT", "5432")),
-          os.getenv("FROST_DB_NAME", "frost"),
-          os.getenv("FROST_DB_USER", "frost"),
-          os.getenv("FROST_DB_PASS", "frost"),
+          ${DB_HOST},
+          ${DB_PORT},
+          ${DB_NAME},
+          ${DB_USER},
+          ${DB_PASS},
           "FROST"
       )
       PY
@@ -57,18 +57,18 @@ services:
 
   db-spatial:
     image: uroplatus666/gis-db:latest
-    container_name: db-spatial
+    container_name: ${PGHOST}
     restart: always
     environment:
-      POSTGRES_USER: pguser
-      POSTGRES_PASSWORD: pgpass
-      POSTGRES_DB: gis
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+      POSTGRES_DB: ${PGDATABASE}
     ports:
-      - "5432:5432"
+      - "${PG_EXTERNAL_PORT}:${PGPORT}"
     volumes:
       - gisdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pguser -d gis"]
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -76,18 +76,18 @@ services:
 
   db-frost:
     image: uroplatus666/frost-db:latest
-    container_name: db-frost
+    container_name: ${DB_HOST}
     restart: always
     environment:
-      POSTGRES_USER: frost
-      POSTGRES_PASSWORD: frost
-      POSTGRES_DB: frost
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
     ports:
-      - "5433:5432"
+      - "${DB_EXTERNAL_PORT}:${DB_PORT}"
     volumes:
       - frostdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U frost -d frost"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 10

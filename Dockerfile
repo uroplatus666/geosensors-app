@@ -40,7 +40,7 @@ COPY . .
 # 7. Финальная синхронизация
 RUN uv sync --no-dev
 
-EXPOSE ${PORT:-8080}
+EXPOSE ${PORT}
 
 # Запускаем через python
 CMD ["python", "app.py"]
