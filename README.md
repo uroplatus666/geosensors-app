@@ -18,7 +18,7 @@
 
 ```
 .
-├── .env.docker           # Переменные окружения
+├── .env                  # Переменные окружения
 ├── .dockerignore         # Исключения для Docker
 ├── .gitignore            # Исключения для Git
 ├── docker-compose.yml    # Docker Compose со сборкой и прокидыванием окружения
@@ -61,7 +61,7 @@
    python app.py
    ```
 
-   Сервер по умолчанию поднимется на `http://127.0.0.1:8080/`.
+   Сервер по умолчанию поднимется на `http://127.0.0.1:9090/`.
 
 
 ## Переменные окружения
@@ -72,15 +72,17 @@
 |-------------------------|---------------------------------------------|-----------------------------------|
 | `DB_HOST`               | совпадает с именем сервиса в docker-compose |db-frost                           |
 | `DB_PORT`               | Порт для БД с данными с FrostServers        |5432                               |
-| `DB_NAME`               | Имя БД с данными с FrostServers             |frost                              |
+| `DB_EXTERNAL_PORT`      | Порт для БД с данными с FrostServers        |5434                               |
+| `DB_NAME`               | Имя БД с данными с FrostServers             |<DB_NAME>                          |
 | `DB_USER`               | Пользователь БД с FrostServers              |<DB_USER>                          |
 | `DB_PASS`               | Пароль от БД с FrostServers                 |<DB_PASS>                          |
 | `PGHOST`                | совпадает с именем сервиса в docker-compose |db-spatial                         |
 | `PGPORT`                | Порт для БД с данными с геоданными          |5432                               |
-| `PGDATABASE`            | Имя БД с геоданными                         |gis                                |
+| `PG_EXTERNAL_PORT`      | Порт для БД с данными с геоданными          |5433                               |
+| `PGDATABASE`            | Имя БД с геоданными                         |<PGDATABASE>                       |
 | `PGUSER`                | Пользователь БД с геоданными                |<PGUSER>                           |
 | `PGPASS`                | Пароль от БД с геоданными                   |<PGPASS>                           |
-| `PORT`                  | Порт на хосте для проброса Docker           |8080                               |
+| `PORT`                  | Порт на хосте для проброса Docker           |9090                               |
 
 ## Запуск в Docker
 
