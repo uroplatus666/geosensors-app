@@ -4,7 +4,7 @@ window.addEventListener("load", function() {
     
     let mapInstance = null;
     
-    // Поиск глобального объекта карты Leaflet, созданного Folium
+    // Поиск инстанса карты Leaflet
     for (let key in window) {
         if (window[key] && typeof window[key] === 'object' && window[key].hasOwnProperty('_leaflet_id')) {
              if (window[key] instanceof L.Map) {
@@ -19,16 +19,28 @@ window.addEventListener("load", function() {
         return; 
     }
 
-    let rasterLayer = null;
-    const vectorLayers = new Map();
+    // Глобальная переменная для хранения текущего слоя на карте
+    window.currentRasterLayer = null; 
+    
+    // Новая переменная: хранит имя последнего выбранного слоя
+    // Это защита от "гонки запросов" (Race Condition)
+    let pendingRasterName = null;
 
-    // --- Функции загрузки слоев ---
+    const geojsonCache = new Map();
+    const activeLayers = new Map();
 
+    // --- РАСТРЫ ---
     async function loadRaster(qualname) {
-        if (rasterLayer) { 
-            mapInstance.removeLayer(rasterLayer); 
-            rasterLayer = null; 
+        // 1. Запоминаем, какой слой мы ХОТИМ видеть прямо сейчас
+        pendingRasterName = qualname;
+
+        // 2. Сразу удаляем старый слой, если он есть на карте
+        if (window.currentRasterLayer) { 
+            mapInstance.removeLayer(window.currentRasterLayer); 
+            window.currentRasterLayer = null; 
         }
+
+        // Если выбрано "— нет —", просто выходим (слой уже удален выше)
         if (!qualname) return;
         
         const [schema, table] = qualname.split('.', 2);
@@ -39,73 +51,114 @@ window.addEventListener("load", function() {
             if (!r.ok) throw new Error(await r.text());
             const js = await r.json();
             
+            // 3. ПРОВЕРКА АКТУАЛЬНОСТИ: 
+            // Пока мы качали этот слой, пользователь мог выбрать другой.
+            // Если pendingRasterName изменился, значит этот результат уже не нужен.
+            if (pendingRasterName !== qualname) {
+                console.log("Игнорируем устаревший слой:", qualname);
+                return; 
+            }
+            
             const opacity = parseFloat(document.getElementById('raster-opacity').value);
             
-            rasterLayer = L.imageOverlay(js.data_url, js.bounds, {
+            const newLayer = L.imageOverlay(js.data_url, js.bounds, {
                 opacity: opacity,
                 pane: 'overlayPane', 
-                interactive: false
-            }).addTo(mapInstance);
-            
+                interactive: false,
+                zIndex: 1
+            });
+
+            newLayer.addTo(mapInstance);
+            window.currentRasterLayer = newLayer; // Сохраняем ссылку на актуальный слой
             mapInstance.fitBounds(js.bounds);
         } catch(e) { 
             console.error('Raster error:', e); 
         }
     }
 
-    async function ensureVector(qualname) {
-        if (vectorLayers.has(qualname)) return;
+    // --- ВЕКТОРЫ ---
+    async function toggleVectorLayer(checkbox) {
+        const id = checkbox.id;
         
-        const [schema, table] = qualname.split('.', 2);
-        const url = `/api/gis/geojson?schema=${schema}&table=${table}`;
-        
-        try {
-            const r = await fetch(url);
-            if (!r.ok) throw new Error(await r.text());
-            const gj = await r.json();
-            
-            if (!gj || !gj.features || !gj.features.length) return;
+        if (!checkbox.checked) {
+            if (activeLayers.has(id)) {
+                mapInstance.removeLayer(activeLayers.get(id));
+                activeLayers.delete(id);
+            }
+            return;
+        }
 
-            const lyr = L.geoJSON(gj, {
-                style: { 
-                    color: '#ff4500', 
-                    weight: 3, 
-                    opacity: 1, 
-                    fillColor: '#ff8c00', 
-                    fillOpacity: 0.3 
-                },
-                pointToLayer: (f, latlng) => L.circleMarker(latlng, { 
-                    radius: 6, 
-                    color: '#000', 
-                    weight: 1, 
-                    fillColor: '#ff4500', 
-                    fillOpacity: 0.9 
-                }),
-                onEachFeature: (f, l) => { 
-                    if (f.properties) {
-                        l.bindPopup('<div style="max-height:200px;overflow:auto"><pre>' + 
-                            JSON.stringify(f.properties, null, 2) + 
-                        '</pre></div>'); 
+        const table = checkbox.dataset.table; 
+        const filterCol = checkbox.dataset.col; 
+        const filterVal = checkbox.dataset.val; 
+        const color = checkbox.dataset.color || '#3388ff';
+        const label = checkbox.dataset.label;
+
+        let geojsonData = geojsonCache.get(table);
+        if (!geojsonData) {
+            try {
+                const [schema, tblName] = table.split('.', 2);
+                const url = `/api/gis/geojson?schema=${schema}&table=${tblName}`;
+                const r = await fetch(url);
+                if (!r.ok) throw new Error('Fetch failed');
+                geojsonData = await r.json();
+                
+                if (!geojsonData || !geojsonData.features) geojsonData = {type: "FeatureCollection", features: []};
+                
+                geojsonCache.set(table, geojsonData);
+            } catch (e) {
+                console.error("Error loading vector:", table, e);
+                return;
+            }
+        }
+
+        const lyr = L.geoJSON(geojsonData, {
+            filter: function(feature) {
+                if (filterCol && filterVal) {
+                    let prop = feature.properties[filterCol];
+                    if (typeof prop === 'string') {
+                        prop = prop.trim();
                     }
+                    return prop === filterVal;
                 }
-            }).addTo(mapInstance);
-            
-            lyr.bringToFront();
-            vectorLayers.set(qualname, lyr);
-        } catch(e) { 
-            console.error('Vector error:', e); 
-        }
+                return true; 
+            },
+            style: function(feature) {
+                return {
+                    color: color,      
+                    weight: 1,
+                    opacity: 1,
+                    fillColor: color,  
+                    fillOpacity: 0.7
+                };
+            },
+            pointToLayer: (f, latlng) => L.circleMarker(latlng, { 
+                radius: 6, 
+                color: '#fff', 
+                weight: 1, 
+                fillColor: color, 
+                fillOpacity: 0.9 
+            }),
+            onEachFeature: (f, l) => { 
+                if (f.properties) {
+                    let content = `<div style='font-family:sans-serif; font-size:12px;'><strong>${label}</strong><br>`;
+                    for (const [k, v] of Object.entries(f.properties)) {
+                        if (v !== null && k !== 'gid' && k !== 'geom') {
+                            let displayVal = typeof v === 'string' ? v.trim() : v;
+                            content += `<b>${k}:</b> ${displayVal}<br>`;
+                        }
+                    }
+                    content += "</div>";
+                    l.bindPopup(content); 
+                }
+            }
+        });
+
+        lyr.addTo(mapInstance);
+        activeLayers.set(id, lyr);
     }
 
-    function disableVector(qualname) {
-        const lyr = vectorLayers.get(qualname);
-        if (lyr) { 
-            mapInstance.removeLayer(lyr); 
-            vectorLayers.delete(qualname); 
-        }
-    }
-
-    // --- Привязка событий ---
+    // --- EVENT LISTENERS ---
 
     const rasterSelect = document.getElementById('raster-select');
     if (rasterSelect) {
@@ -115,18 +168,14 @@ window.addEventListener("load", function() {
     const opacityInput = document.getElementById('raster-opacity');
     if (opacityInput) {
         opacityInput.addEventListener('input', e => {
-            if (rasterLayer) rasterLayer.setOpacity(parseFloat(e.target.value));
+            if (window.currentRasterLayer) {
+                window.currentRasterLayer.setOpacity(parseFloat(e.target.value));
+            }
         });
     }
     
     document.querySelectorAll('.vector-checkbox').forEach(cb => {
-        cb.addEventListener('change', () => {
-            if (cb.checked) ensureVector(cb.value);
-            else disableVector(cb.value);
-        });
+        cb.addEventListener('change', () => toggleVectorLayer(cb));
     });
-    
-    // Загрузка дефолтных включенных векторов
-    document.querySelectorAll('.vector-checkbox:checked').forEach(cb => ensureVector(cb.value));
 });
 </script>

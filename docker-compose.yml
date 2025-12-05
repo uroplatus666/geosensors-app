@@ -2,7 +2,7 @@ services:
   frontend:
     build: .
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:${PORT:-8080}"
     env_file:
       - .env.docker
     depends_on:
@@ -10,6 +10,8 @@ services:
         condition: service_healthy
       db-frost:
         condition: service_healthy
+    volumes:
+      - ./:/app
     command: |
       sh -c '
       python - << "PY"

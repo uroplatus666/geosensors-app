@@ -1,8 +1,6 @@
-# Используем Python 3.10-slim как базу
 FROM python:3.10-slim
 
-# 1. Устанавливаем системные библиотеки (GDAL для карт)
-# Это нужно делать ДО установки Python-пакетов
+# 1. Системные библиотеки
 RUN apt-get update && apt-get install -y \
     binutils \
     libproj-dev \
@@ -12,38 +10,37 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Настройки для корректной сборки GDAL/Rasterio (если uv решит собирать из исходников)
 ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
 ENV C_INCLUDE_PATH=/usr/include/gdal
 
-# 2. Устанавливаем uv (копируем официальный бинарник — это best practice)
+# 2. Устанавливаем uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Настройки uv для Docker
+# 3. Настраиваем uv, чтобы venv был НЕ в /app
+# Мы создадим его в корне /venv, куда не дотянется docker volume
+ENV UV_PROJECT_ENVIRONMENT="/venv"
 ENV UV_COMPILE_BYTECODE=1 
 ENV UV_LINK_MODE=copy
 
+# Добавляем этот путь в PATH, чтобы python запускался оттуда автоматически
+ENV PATH="/venv/bin:$PATH"
+
 WORKDIR /app
 
-# 3. Сначала копируем файлы зависимостей (для кэширования слоев Docker)
-# Если вы не меняли зависимости, Docker пропустит этот шаг и возьмет кэш
+# 4. Копируем файлы зависимостей
 COPY pyproject.toml uv.lock ./
 
-# 4. Синхронизируем зависимости
-# --frozen: строго использовать uv.lock (не обновлять версии)
-# --no-install-project: пока не ставим само приложение, только библиотеки
-RUN uv sync --frozen --no-install-project --no-dev
+# 5. Устанавливаем зависимости в /venv
+# Убираем --frozen, если вы правили pyproject.toml вручную и не обновляли lock-файл
+RUN uv sync --no-install-project --no-dev
 
-# 5. Копируем остальной код
+# 6. Копируем код
 COPY . .
 
-# 6. Доустанавливаем проект (если он оформлен как пакет) или просто убеждаемся, что всё ок
-RUN uv sync --frozen --no-dev
+# 7. Финальная синхронизация
+RUN uv sync --no-dev
 
-# Добавляем виртуальное окружение uv в PATH, чтобы команды python/flask работали напрямую
-ENV PATH="/app/.venv/bin:$PATH"
+EXPOSE ${PORT:-8080}
 
-EXPOSE 8080
-
-# 7. Запускаем через uv run или напрямую python (так как PATH уже настроен)
-CMD ["uv", "run", "app.py"]
+# Запускаем через python
+CMD ["python", "app.py"]
