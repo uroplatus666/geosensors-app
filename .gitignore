@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Виртуальные окружения (uv создает .venv) ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Переменные окружения и секреты ---
+# Игнорируем реальные файлы с ключами, но оставляем примеры (.example)
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# --- IDE и редаторы кода ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Операционные системы ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.Zone.Identifier
+
+# --- Логи и базы данных ---
+*.log
+*.sqlite
+*.db
+
+# --- Специфично для этого проекта ---
+output/
+
+# --- Docker ---
+# Если используешь локальные оверрайды для docker-compose
+docker-compose.override.yml
