@@ -28,7 +28,7 @@ class GisService:
         "monitoring_points_campus", "sampling_campus", "tree_inventory_campus"
     }
     DEFAULT_VECTOR_LIMIT = 20000
-    DEFAULT_SIMPLIFY_TOLERANCE = 0.0001
+    DEFAULT_SIMPLIFY_TOLERANCE = 0
 
     @staticmethod
     def get_connection():
@@ -310,4 +310,5 @@ except Exception as e:
     RASTER_LAYERS = []
     VECTOR_LAYERS = []
     RASTER_BY_NAME = {}
+
     VECTOR_BY_NAME = {}
