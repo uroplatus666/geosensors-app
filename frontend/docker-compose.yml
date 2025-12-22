@@ -1,0 +1,105 @@
+services:
+  frontend:
+    build: .
+    ports:
+      - "${PORT}:${PORT}"
+    env_file:
+      - .env
+    depends_on:
+      db-spatial:
+        condition: service_healthy
+      db-frost:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    command: |
+      sh -c '
+      python - << "PY"
+      import os, time, sys, psycopg2
+      # ... (ваш код ожидания БД в frontend) ...
+      PY
+      exec python app.py
+      '
+    restart: always
+  loader-rudn:
+    build:
+      context: ../bd-loaders/loader-rudn
+      dockerfile: Dockerfile
+    container_name: frost_loader_rudn
+    restart: always
+    env_file:
+      - ../bd-loaders/loader-rudn/.env
+    depends_on:
+      db-spatial:
+        condition: service_healthy
+      db-frost:
+        condition: service_healthy
+  loader-hse:
+    build:
+      context: ../bd-loaders/loader
+      dockerfile: Dockerfile
+    container_name: frost_loader_hse
+    restart: always
+    env_file:
+      - ../bd-loaders/loader/.env
+    depends_on:
+      db-spatial:
+        condition: service_healthy
+      db-frost:
+        condition: service_healthy
+  sensor-community-frost-hse-loader:
+    build:
+      context: ../sensor-community
+      dockerfile: Dockerfile
+    container_name: sensor-community-frost-hse-loader
+    restart: always
+    env_file:
+      - ../sensor-community/.env
+    volumes:
+      - ../sensor-community/data_archive:/data
+    depends_on:
+      db-spatial:
+        condition: service_healthy
+      db-frost:
+        condition: service_healthy
+  db-spatial:
+    image: uroplatus666/gis-db:latest
+    container_name: ${PGHOST}
+    restart: always
+    environment:
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+      POSTGRES_DB: ${PGDATABASE}
+    ports:
+      - "${PG_EXTERNAL_PORT}:${PGPORT}"
+    volumes:
+      - gisdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  db-frost:
+    image: uroplatus666/frost-db:latest
+    container_name: ${DB_HOST}
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_EXTERNAL_PORT}:${DB_PORT}"
+    volumes:
+      - frostdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  gisdata:
+  frostdata:

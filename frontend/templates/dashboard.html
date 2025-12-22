@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Дашборд - {{ title }}</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <!-- Подключение Bootstrap и иконок -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    
+    <!-- Наши стили -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    
+    <!-- Скрипты библиотек -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <!-- Навигация -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/" onclick="if (history.length > 1) { history.back(); return false; } else { return true; }">
+                <i class="bi bi-arrow-left"></i> Назад
+            </a>
+            <div class="sensor-header">
+                <img src="{{ icon_url }}" class="sensor-logo" alt="Sensor">
+                <h2 class="text-white mb-0">{{ title }}</h2>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Плавающая кнопка выбора другого сенсора -->
+    <div class="sensor-dropdown-fixed">
+        <div class="dropdown">
+            <button class="btn btn-light dropdown-toggle shadow-sm" type="button" data-bs-toggle="dropdown">
+                Выбрать сенсор
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" style="max-height: 400px; overflow-y: auto;">
+                {% for s in sensors %}
+                <li><a class="dropdown-item {% if s.key == sensor_key %}active{% endif %}" href="/dashboard/{{ s.key }}">{{ s.title }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+
+    <div class="container-fluid py-3">
+        
+        <!-- 1. Карточки текущих значений -->
+        <div class="metrics-container">
+            {% for key, item in current.items() %}
+            <div class="metric-card card-{{ key.replace('.', '_') }}">
+                <div class="d-flex align-items-center mb-2">
+                    <i class="bi bi-{{ item.icon }} metric-icon me-2"></i>
+                    <span class="metric-label">{{ item.desc }}</span>
+                </div>
+                <div class="metric-value">
+                    {{ item.value }}<span style="font-size: 0.6em; margin-left:4px;">{{ item.unit }}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- 2. Блок Ветра (компас и роза ветров) -->
+        {% if has_wind %}
+        <div class="wind-row">
+            <!-- Компас -->
+            <div class="wind-widget">
+                <div class="d-flex flex-column align-items-center justify-content-center" style="min-width: 180px;">
+                    <div id="wind-face" class="wind-face">
+                        <div id="wind-needle" class="wind-needle"></div>
+                    </div>
+                    <div class="mt-3 text-center">
+                        <div style="font-size: 1.2rem; font-weight: 700;">{{ last_sm }} м/с</div>
+                        <div class="text-muted small">{{ dir_str }}</div>
+                    </div>
+                </div>
+                <div class="flex-grow-1">
+                    <h5 class="mb-3">Ветер</h5>
+                    <p class="text-muted small">
+                        Отображается мгновенное направление и скорость ветра. Стрелка указывает, <b>откуда</b> дует ветер.
+                        Цвет стрелки меняется от голубого к синему и темно-зеленому при усилении ветра.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Роза ветров -->
+            <div class="rose-card">
+                <h5 class="mb-0 px-2 pt-2">Роза ветров (за все время)</h5>
+                <div id="wind-rose" style="height: 300px;"></div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- 3. Основной график и настройки -->
+        <div class="graph-section">
+            <!-- Сайдбар с настройками -->
+            <div class="metrics-sidebar">
+                <div class="sidebar-inner">
+                    <h5 class="mb-3"><i class="bi bi-sliders"></i> Настройки графика</h5>
+                    
+                    <label class="form-label fw-bold">Метрики:</label>
+                    <select id="metrics-select" class="form-select wrap-select mb-3" multiple size="8">
+                        {% for p in obs_props %}
+                        <option value="{{ p.name }}" {% if loop.first %}selected{% endif %}>
+                            {{ p.desc }} ({{ p.unit }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <div class="form-text mb-3 small">Зажмите Ctrl (Cmd) для выбора нескольких.</div>
+
+                    <label class="form-label fw-bold">Период:</label>
+                    <select id="range-select" class="form-select mb-3">
+                        <option value="1d">Сутки (24ч)</option>
+                        <option value="3d">3 Дня</option>
+                        <option value="7d" selected>Неделя</option>
+                        <option value="30d">Месяц</option>
+                        <option value="all">Всё время</option>
+                    </select>
+
+                    <label class="form-label fw-bold">Детализация:</label>
+                    <select id="agg-select" class="form-select mb-3">
+                        <option value="raw">Исходные данные (10 мин)</option>
+                        <option value="1h" selected>Среднее за час</option>
+                        <option value="3h">Среднее за 3 часа</option>
+                        <option value="1d">Среднее за сутки</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Область графика -->
+            <div class="graph-wrap">
+                <div class="graph-card">
+                    <div class="graph-header">
+                        <h5 class="graph-title">Динамика показателей</h5>
+                    </div>
+                    <div class="graph-body">
+                        <div id="plotly-graph"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Передача данных из Python (Jinja2) в JavaScript -->
+    <script>
+        window.DASHBOARD_CONFIG = {
+            sensor_key: "{{ sensor_key }}",
+            last_dm: {{ last_dm if last_dm is not none else 'null' }},
+            last_sm: {{ last_sm if last_sm is not none else 'null' }},
+            colors: {
+                dark_green: "{{ DARK_GREEN }}",
+                pale_blue: "{{ PALE_BLUE }}",
+                slate: "{{ SLATE }}"
+            },
+            rose_data: {
+                theta: {{ rose_theta | tojson }},
+                r: {{ rose_r | tojson }},
+                c: {{ rose_c | tojson }}
+            }
+        };
+    </script>
+    
+    <!-- Подключаем логику дашборда -->
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
