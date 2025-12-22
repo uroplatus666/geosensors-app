@@ -1,0 +1,13 @@
+{   "load_interval": 86400,
+    "mapbox_token": "",
+    "frost_url": "http://90.156.134.128:8080/FROST-Server/v1.1",
+    "data_dir": "/data",
+    "sensors": {
+        "sds": {
+            "82334": {"start": "30.09.2025", "end": "auto"}
+        },
+        "bme": {
+            "82335": {"start": "30.09.2025", "end": "auto"}
+        }
+    }
+}
