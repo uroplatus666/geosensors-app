@@ -157,7 +157,8 @@ docker compose down -v
 ```
 
 __________________________________________________
-### [Скрины сервиса](https://github.com/uroplatus666/geosensors-app/tree/front-bd-loaders/images)
+<summary><h2>📷 [Скрины сервиса](https://github.com/uroplatus666/geosensors-app/tree/front-bd-loaders/images)</h2>
+(Нажмите, чтобы развернуть)</summary>
 
 `Карта с всплывающим окном`
 <div style="text-align: center;">
