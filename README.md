@@ -194,3 +194,5 @@ __________________________________________________
 <div style="text-align: center;">
     <img src="images/vector_data2.jpg" alt="vector_data2" width="700"/>
 </div>
+
+</details>
