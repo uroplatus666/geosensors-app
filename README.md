@@ -155,3 +155,41 @@ docker logs -f db-spatial
 ```bash
 docker compose down -v
 ```
+
+__________________________________________________
+### [Скрины сервиса](https://github.com/uroplatus666/geosensors-app/tree/front-bd-loaders/images)
+
+`Карта с всплывающим окном`
+<div style="text-align: center;">
+    <img src="images/map_popup.jpg" alt="map_popup" width="700"/>
+</div>
+
+`Верхняя часть дашборда для одного из сенсоров. Навигация, карточки с основными значениями, компас ветра, роза ветров`
+<div style="text-align: center;">
+    <img src="images/dashboard_up.jpg" alt="dashboard_up" width="700"/>
+</div>
+
+`Нижняя часть дашборда для одного из сенсоров. Интерактивный график с рядом параметров и фильтров`
+<div style="text-align: center;">
+    <img src="images/dashboard_down.jpg" alt="dashboard_down" width="700"/>
+</div>
+
+`Отображение растровых данных на карте`
+<div style="text-align: center;">
+    <img src="images/raster_data.jpg" alt="raster_data" width="700"/>
+</div>
+
+`Отображение растровых и векторных данных на карте`
+<div style="text-align: center;">
+    <img src="images/raster_vector_data.jpg" alt="raster_vector_data" width="700"/>
+</div>
+
+`Отображение векторных данных`
+<div style="text-align: center;">
+    <img src="images/vector_data.jpg" alt="vector_data" width="700"/>
+</div>
+
+`Отображение векторных данных`
+<div style="text-align: center;">
+    <img src="images/vector_data2.jpg" alt="vector_data2" width="700"/>
+</div>
