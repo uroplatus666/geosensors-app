@@ -156,6 +156,10 @@ docker logs -f db-spatial
 docker compose down -v
 ```
 
+`Схема сервиса`
+<div style="text-align: center;">
+    <img src="images/scheme.jpg" alt="scheme" width="700"/>
+</div>
 __________________________________________________
 <details>  
 <summary><h2>📷 Скрины сервиса</h2>
