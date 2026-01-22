@@ -5,7 +5,7 @@
 - БД PostgreSQL с даннными с FrostServers (docker image: `uroplatus666/frosts-db:latest`)
 - БД PostgreSQL с векторными и растровыми данными (docker image: `uroplatus666/gis-db:latest`)
 - Загрузка данных из FROST серверов в БД в режиме real time
-- Парсинг данных с (sensor-community)[https://archive.sensor.community/], обработка и загрузка на FROST в режиме real time
+- Парсинг данных с [sensor-community](https://archive.sensor.community/), обработка и загрузка на FROST в режиме real time
 
 ## Возможности
 
